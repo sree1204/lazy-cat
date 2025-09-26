@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Lazy Cat",
+  "description": "Voice-controlled browsing assistant with AI summarizing, rewriting, proofreading, and translation.",
+  "version": "0.1",
+  "permissions": [
+    "tabs",
+    "scripting",
+    "storage",
+    "offscreen",
+    "activeTab"
+  ],
+  "background": {
+    "service_worker": "background/sw.js"
+  },
+  "action": {
+    "default_popup": "ui/popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content/content.js"]
+    }
+  ]
+}
