@@ -1,25 +1,15 @@
 {
   "manifest_version": 3,
-  "name": "Lazy Cat",
-  "description": "Voice-controlled browsing assistant with AI summarizing, rewriting, proofreading, and translation.",
-  "version": "0.1",
-  "permissions": [
-    "tabs",
-    "scripting",
-    "storage",
-    "offscreen",
-    "activeTab"
-  ],
-  "background": {
-    "service_worker": "background/sw.js"
-  },
+  "name": "Lazy Cat — Steps 1 to 3.2",
+  "version": "0.3.2",
+  "description": "Voice → AI JSON → actions (open_tab, scroll, search_web, click_ui) using Chrome built-in on-device AI.",
   "action": {
-    "default_popup": "ui/popup.html"
+    "default_title": "Lazy Cat",
+    "default_popup": "popup.html"
   },
-  "content_scripts": [
-    {
-      "matches": ["<all_urls>"],
-      "js": ["content/content.js"]
-    }
-  ]
+  "permissions": ["tabs", "scripting"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  }
 }
