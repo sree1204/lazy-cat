@@ -9,14 +9,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   switch (command) {
     case "open_tab": {
-      const url = args?.url;
-      if (!url) {
-        sendResponse({ status: "error", message: "Missing url" });
-        break;
+      let url = args?.url && args.url.trim();
+
+      if (url && !/^https?:\/\//i.test(url)) {
+        // Auto-fix bare domains/words
+        url = `https://${url.replace(/\s+/g, "")}.com`;
       }
-      chrome.tabs.create({ url });
-      sendResponse({ status: "ok", action: "opened_tab", url });
-      break;
+
+      chrome.tabs.create(
+        url ? { url } : {}, // blank if still nothing
+        (tab) => {
+          sendResponse({
+            status: "ok",
+            action: url ? "opened_tab_with_url" : "opened_blank_tab",
+            tabId: tab.id,
+            url: tab.url || "about:blank"
+          });
+        }
+      );
+      return true;
     }
 
     case "scroll": {
@@ -605,6 +616,82 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         );
       });
       return true;
+    }
+
+    case "open_window": {
+      chrome.windows.create({}, (win) => {
+        if (chrome.runtime.lastError) {
+          sendResponse({ status: "error", message: chrome.runtime.lastError.message });
+        } else {
+          sendResponse({ status: "ok", action: "opened_window", windowId: win.id });
+        }
+      });
+      return true;
+    }
+
+    case "window_fullscreen_on": {
+      chrome.windows.getCurrent({}, (win) => {
+        if (!win) {
+          sendResponse({ status: "error", message: "No active window found" });
+          return;
+        }
+        if (win.state === "fullscreen") {
+          sendResponse({ status: "ok", action: "already_fullscreen", windowId: win.id });
+          return;
+        }
+        chrome.windows.update(win.id, { state: "fullscreen" }, (updated) => {
+          if (chrome.runtime.lastError) {
+            sendResponse({ status: "error", message: chrome.runtime.lastError.message });
+          } else {
+            sendResponse({ status: "ok", action: "window_fullscreen_on", windowId: updated.id });
+          }
+        });
+      });
+      return true; // async
+    }
+
+    case "window_fullscreen_off": {
+      chrome.windows.getCurrent({}, (win) => {
+        if (!win) {
+          sendResponse({ status: "error", message: "No active window found" });
+          return;
+        }
+        if (win.state !== "fullscreen") {
+          sendResponse({ status: "ok", action: "not_fullscreen", windowId: win.id });
+          return;
+        }
+        chrome.windows.update(win.id, { state: "normal" }, (updated) => {
+          if (chrome.runtime.lastError) {
+            sendResponse({ status: "error", message: chrome.runtime.lastError.message });
+          } else {
+            sendResponse({ status: "ok", action: "window_fullscreen_off", windowId: updated.id });
+          }
+        });
+      });
+      return true; // async
+    }
+
+    case "pop_tab_to_window": {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const tab = tabs?.[0];
+        if (!tab) {
+          sendResponse({ status: "error", message: "No active tab found" });
+          return;
+        }
+        chrome.windows.create({ tabId: tab.id }, (newWin) => {
+          if (chrome.runtime.lastError) {
+            sendResponse({ status: "error", message: chrome.runtime.lastError.message });
+          } else {
+            sendResponse({
+              status: "ok",
+              action: "pop_tab_to_window",
+              tabId: tab.id,
+              windowId: newWin.id
+            });
+          }
+        });
+      });
+      return true; // async
     }
 
     default:

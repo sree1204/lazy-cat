@@ -122,15 +122,23 @@ async function aiInterpret(commandText) {
             "refresh",
             "go_forward",
             "close_tab",
-            "next_tab", // Added new command
-            "previous_tab" // Added new command
+            "next_tab",
+            "previous_tab",
+            "open_window",
+            "window_fullscreen_on",
+            "window_fullscreen_off",
+            "pop_tab_to_window"
           ]
         },
         args: {
           type: "object",
           properties: {
-            // open_tab
-            url: { type: "string" },
+
+            // Replace the existing `url` property with the updated schema
+            url: { 
+              type: "string", 
+              description: "Full https:// URL if user asked to open a website. Omit only if the user explicitly said 'open new tab' or 'blank tab'. Never leave it empty when a site/domain is mentioned." 
+            },
             // scroll
             direction: { type: "string", enum: ["up", "down"] },
             // search_web
@@ -172,7 +180,12 @@ async function aiInterpret(commandText) {
         content:
           "You are Lazy Cat's command router.\n" +
           "Output ONLY valid JSON per schema. Exactly one command per request.\n" +
-          "For open_tab: command='open_tab' and args.url must be a full https URL.\n" +
+          "Open tab rules:\n" +
+          "• If user says 'open new tab', 'create new tab', 'blank tab' → command='open_tab' with NO url.\n" +
+          "• If user says 'open <site>' like 'amazon', 'youtube', 'gmail', etc. → command='open_tab' with args.url = full https:// URL.\n" +
+          "   - Always expand to 'https://<site>.com' unless a full URL is already given.\n" +
+          "   - Example: 'open amazon' → {command:'open_tab', args:{url:'https://amazon.com'}}\n" +
+          "• Never output 'open_tab' without url when the phrase includes a website name.\n" +
           "Scrolling rules:\n" +
           "• Use command='scroll' with args.direction='up' or 'down' ONLY for small step movements (phrases like 'scroll down', 'scroll up', 'slide down', 'move up a bit').\n" +
           "• Use command='scroll_bottom' ONLY for explicit requests to go all the way to the end of the page (phrases like 'scroll to bottom', 'all the way down', 'end of page').\n" +
@@ -191,6 +204,15 @@ async function aiInterpret(commandText) {
           "For close_tab: command='close_tab'. args is empty. Trigger on explicit phrases like 'close tab', 'shut this tab', 'remove current tab'.\n" +
           "For 'next tab' or 'switch tab right' use command='next_tab'.\n" +
           "For 'previous tab' or 'switch tab left' use command='previous_tab'.\n" +
+          "For opening a website (e.g., 'open amazon', 'open youtube.com'), use command='open_tab' with url.\n" +
+          "For a blank/empty tab (e.g., 'open new tab', 'create new tab'), use command='open_tab' with NO url.\n" +
+          "For explicit phrases like 'open new window', 'create window', or 'new browser window', use command='open_window'.\n" +
+          "Never use 'open_window' for websites — those must always be 'open_tab'.\n" +
+          "For explicit phrases like 'go fullscreen', 'enter fullscreen', 'open fullscreen mode' use command='window_fullscreen_on'.\n" +
+          "For explicit phrases like 'exit fullscreen', 'leave fullscreen', 'restore window' use command='window_fullscreen_off'.\n" +
+          "Never use this for opening websites or windows.\n" +
+          "For explicit phrases like 'open this page in a new window', 'pop this tab out', 'move this tab to a new window' use command='pop_tab_to_window'.\n" +
+          "Never confuse this with 'open_window' (creates empty window) or 'open_tab' (creates a new tab).\n" +
           "Never invent other fields. Never output any text outside the JSON."
       },
       { role: "user", content: commandText }
