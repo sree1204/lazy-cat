@@ -694,6 +694,52 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true; // async
     }
 
+    case "ask_page": {
+      chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
+        const tab = tabs?.[0];
+        if (!tab?.id) {
+          sendResponse({ status: "error", message: "No active tab found" });
+          return;
+        }
+
+        const [{ result: extraction }] = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: () => {
+            const clamp = (s, max = 60000) => (s || "").slice(0, max);
+            return clamp(document.body?.innerText || "");
+          }
+        });
+
+        if (!extraction) {
+          sendResponse({ status: "error", message: "No page text available" });
+          return;
+        }
+
+        try {
+          const session = await LanguageModel.create({
+            output: { type: "text", languageCode: "en" }
+          });
+
+          const prompt = [
+            {
+              role: "system",
+              content: "You are a page assistant. Answer the question using ONLY the text from the page provided. Be concise and factual."
+            },
+            { role: "user", content: "Page:\n" + extraction },
+            { role: "user", content: "Question:\n" + data.args.question }
+          ];
+
+          const answer = await session.prompt(prompt);
+          session.destroy?.();
+
+          sendResponse({ status: "ok", action: "ask_page", answer: String(answer).trim() });
+        } catch (err) {
+          sendResponse({ status: "error", message: err.message });
+        }
+      });
+      return true;
+    }
+
     default:
       sendResponse({ status: "noop", message: `Unsupported command: ${command}` });
   }

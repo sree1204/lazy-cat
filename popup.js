@@ -127,7 +127,8 @@ async function aiInterpret(commandText) {
             "open_window",
             "window_fullscreen_on",
             "window_fullscreen_off",
-            "pop_tab_to_window"
+            "pop_tab_to_window",
+            "ask_page"
           ]
         },
         args: {
@@ -155,7 +156,9 @@ async function aiInterpret(commandText) {
             // type_text
             text:   { type: "string" },          // what to type (required)
             target: { type: "string" },          // e.g., "search", "email", "subject", "name", or free-form hint
-            submit: { type: "boolean" }          // true = press Enter/submit after typing
+            submit: { type: "boolean" },          // true = press Enter/submit after typing
+            // new question property
+            question: { type: "string", description: "User's natural language question about the current page content" }
           },
           additionalProperties: false
         },
@@ -213,7 +216,8 @@ async function aiInterpret(commandText) {
           "Never use this for opening websites or windows.\n" +
           "For explicit phrases like 'open this page in a new window', 'pop this tab out', 'move this tab to a new window' use command='pop_tab_to_window'.\n" +
           "Never confuse this with 'open_window' (creates empty window) or 'open_tab' (creates a new tab).\n" +
-          "Never invent other fields. Never output any text outside the JSON."
+          "Never invent other fields. Never output any text outside the JSON." +
+          "For natural language questions about the current page (e.g., \"What are the dimensions?\", \"Who is the author?\", \"When was this posted?\"), use command='ask_page' with args.question containing the user's exact question."
       },
       { role: "user", content: commandText }
     ]);
