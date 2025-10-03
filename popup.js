@@ -116,11 +116,14 @@ async function aiInterpret(commandText) {
             "summarize",
             "rewrite_selection",
             "draft_email",
-            "type_text", // ← added
-            "focus_ui",                 // ← add this
-            "go_back", // ← added
-            "refresh", // ← added
-            "go_forward" // ← added
+            "type_text",
+            "focus_ui",
+            "go_back",
+            "refresh",
+            "go_forward",
+            "close_tab",
+            "next_tab", // Added new command
+            "previous_tab" // Added new command
           ]
         },
         args: {
@@ -185,6 +188,9 @@ async function aiInterpret(commandText) {
           "For on-page verbs like \"go to/open/select/choose/activate …\", map to click_ui with args.text as the target label. For \"focus …/put cursor in …\", map to focus_ui with args.text as the target label.\n" +
           "For refresh: command='refresh'. args is empty. Trigger on phrases like 'refresh', 'reload', 'reload this page'.\n" +
           "For go_forward: command='go_forward'. args is empty. Trigger on phrases like 'go forward', 'forward', 'next page'.\n" +
+          "For close_tab: command='close_tab'. args is empty. Trigger on explicit phrases like 'close tab', 'shut this tab', 'remove current tab'.\n" +
+          "For 'next tab' or 'switch tab right' use command='next_tab'.\n" +
+          "For 'previous tab' or 'switch tab left' use command='previous_tab'.\n" +
           "Never invent other fields. Never output any text outside the JSON."
       },
       { role: "user", content: commandText }

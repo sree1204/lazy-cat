@@ -509,6 +509,104 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true; // async
     }
 
+    case "scroll_bottom": {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const tabId = tabs?.[0]?.id;
+        if (!tabId) {
+          sendResponse({ status: "error", message: "No active tab found" });
+          return;
+        }
+        chrome.scripting.executeScript(
+          {
+            target: { tabId },
+            func: () => {
+              const target = document.scrollingElement || document.body || document.documentElement;
+              if (target) target.scrollTo({ top: target.scrollHeight, behavior: "smooth" });
+            }
+          },
+          () => sendResponse({ status: "ok", action: "scrolled_bottom" })
+        );
+      });
+      return true;
+    }
+
+    case "scroll_top": {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const tabId = tabs?.[0]?.id;
+        if (!tabId) {
+          sendResponse({ status: "error", message: "No active tab found" });
+          return;
+        }
+        chrome.scripting.executeScript(
+          {
+            target: { tabId },
+            func: () => {
+              const target = document.scrollingElement || document.body || document.documentElement;
+              if (target) target.scrollTo({ top: 0, behavior: "smooth" });
+            }
+          },
+          () => sendResponse({ status: "ok", action: "scrolled_top" })
+        );
+      });
+      return true;
+    }
+
+    case "close_tab": {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const tabId = tabs?.[0]?.id;
+        if (!tabId) {
+          sendResponse({ status: "error", message: "No active tab found" });
+          return;
+        }
+        chrome.tabs.remove(tabId, () => {
+          if (chrome.runtime.lastError) {
+            sendResponse({ status: "error", message: chrome.runtime.lastError.message });
+          } else {
+            sendResponse({ status: "ok", action: "closed_tab", tabId });
+          }
+        });
+      });
+      return true; // async
+    }
+
+    case "next_tab": {
+      chrome.tabs.query({ currentWindow: true }, (tabs) => {
+        if (!tabs || !tabs.length) {
+          sendResponse({ status: "error", message: "No tabs in window" });
+          return;
+        }
+        const activeTab = tabs.find((t) => t.active);
+        if (!activeTab) {
+          sendResponse({ status: "error", message: "No active tab found" });
+          return;
+        }
+        const idx = (activeTab.index + 1) % tabs.length;
+        chrome.tabs.update(tabs[idx].id, { active: true }, () =>
+          sendResponse({ status: "ok", action: "moved_next", tabIndex: idx })
+        );
+      });
+      return true;
+    }
+
+    case "previous_tab": {
+      chrome.tabs.query({ currentWindow: true }, (tabs) => {
+        if (!tabs || !tabs.length) {
+          sendResponse({ status: "error", message: "No tabs in window" });
+          return;
+        }
+        const activeTab = tabs.find((t) => t.active);
+        if (!activeTab) {
+          sendResponse({ status: "error", message: "No active tab found" });
+          return;
+        }
+        const idx = (activeTab.index - 1 + tabs.length) % tabs.length;
+        chrome.tabs.update(tabs[idx].id, { active: true }, () =>
+          sendResponse({ status: "ok", action: "moved_previous", tabIndex: idx })
+        );
+      });
+      return true;
+    }
+
     default:
       sendResponse({ status: "noop", message: `Unsupported command: ${command}` });
   }
