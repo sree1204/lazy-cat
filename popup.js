@@ -109,6 +109,8 @@ async function aiInterpret(commandText) {
           enum: [
             "open_tab",
             "scroll",
+            "scroll_bottom",
+            "scroll_top",
             "search_web",
             "click_ui",
             "summarize",
@@ -168,7 +170,11 @@ async function aiInterpret(commandText) {
           "You are Lazy Cat's command router.\n" +
           "Output ONLY valid JSON per schema. Exactly one command per request.\n" +
           "For open_tab: command='open_tab' and args.url must be a full https URL.\n" +
-          "For scroll: command='scroll', args.direction must be 'up' or 'down'.\n" +
+          "Scrolling rules:\n" +
+          "• Use command='scroll' with args.direction='up' or 'down' ONLY for small step movements (phrases like 'scroll down', 'scroll up', 'slide down', 'move up a bit').\n" +
+          "• Use command='scroll_bottom' ONLY for explicit requests to go all the way to the end of the page (phrases like 'scroll to bottom', 'all the way down', 'end of page').\n" +
+          "• Use command='scroll_top' ONLY for explicit requests to go all the way to the top (phrases like 'scroll to top', 'all the way up', 'back to top').\n" +
+          "Never substitute 'scroll' for 'scroll_bottom' or 'scroll_top'.\n" +
           "For go_back: command='go_back'. args is empty. Trigger on phrases like 'go back', 'back', 'previous page'.\n" +
           "For search_web: command='search_web', args.query is the user's search terms.\n" +
           "For click_ui: command='click_ui', args.text is the visible label to click.\n" +
