@@ -10,6 +10,7 @@ let listening = false;
 let recognition;
 let wakeActive = false;
 let wakeTimer = null;
+let processingUtterance = false; // prevent overlapping handling
 
 // ===== UI
 const btn = document.getElementById("btnToggle");
@@ -112,7 +113,6 @@ async function aiInterpret(commandText) {
             "scroll_bottom",
             "scroll_top",
             "search_web",
-            "click_ui",
             "summarize",
             "rewrite_selection",
             "draft_email",
@@ -195,8 +195,12 @@ async function aiInterpret(commandText) {
           "• Use command='scroll_top' ONLY for explicit requests to go all the way to the top (phrases like 'scroll to top', 'all the way up', 'back to top').\n" +
           "Never substitute 'scroll' for 'scroll_bottom' or 'scroll_top'.\n" +
           "For go_back: command='go_back'. args is empty. Trigger on phrases like 'go back', 'back', 'previous page'.\n" +
-          "For search_web: command='search_web', args.query is the user's search terms.\n" +
-          "For click_ui: command='click_ui', args.text is the visible label to click.\n" +
+          "Search rules (STRICT):\n" +
+          "• Use command='search_web' ONLY when the user says an explicit search verb such as: 'search', 'search for', 'look for', 'look up', 'find', or 'google'.\n" +
+          "• If the user does NOT use an explicit search verb, DO NOT use 'search_web'. Prefer 'type_text' targeting a search field, and do NOT submit.\n" +
+          "• Never infer a search from a bare noun phrase.\n" +
+          "For search_web (when explicit only): command='search_web', args.query is the user's search terms.\n" +
+          "Clicking is temporarily disabled. Do not use any click commands.\n" +
           "For summarize: command='summarize', args.target is 'auto' unless user says selection/email/page.\n" +
           "For rewrite_selection: command='rewrite_selection'. args.tone is free-form; if missing, assume 'natural'. Return ONLY the rewritten text.\n" +
           "For draft_email: command='draft_email'. args.details is the gist of the reply; args.email_tone is optional (free-form, default 'polite professional'). Return ONLY the draft email text (no subject line).\n" +
@@ -236,12 +240,17 @@ async function aiInterpret(commandText) {
       parsed = { command: "noop", args: {}, confirmation: "none", error: "Could not parse AI output" };
     }
 
-    appendTranscript("🤖 " + JSON.stringify(parsed, null, 2));
+  appendTranscript("🤖 " + JSON.stringify(parsed, null, 2));
 
-    // Intercepts that run IN THE POPUP (not background)
+  // Intercepts that run IN THE POPUP (not background)
     if (parsed.command === "summarize") {
       const target = parsed.args?.target || "auto";
       await handleSummarizeFromPopup(target);
+      return;
+    }
+    // Guard: clicking disabled for now
+    if (parsed.command === "click_ui") {
+      appendTranscript("ℹ️ Click is disabled right now.");
       return;
     }
     if (parsed.command === "rewrite_selection") {
@@ -264,6 +273,22 @@ async function aiInterpret(commandText) {
       if (parsed.args.submit && !/^(search|query)$/.test(tHint)) {
         parsed.args.submit = false;
       }
+      // New: if the utterance did not include an explicit search verb, never auto-submit
+      if (parsed.args.submit && !isExplicitSearch(commandText)) {
+        parsed.args.submit = false;
+      }
+    }
+
+    // Enforce strict search gating: only allow search_web with explicit verbs
+    if (parsed.command === "search_web" && !isExplicitSearch(commandText)) {
+      const q = (parsed.args?.query || "").trim();
+      // Downgrade to typing into search without submit
+      parsed = {
+        command: "type_text",
+        args: { text: q, target: "search", submit: false },
+        confirmation: "none"
+      };
+      appendTranscript("ℹ️ Converted to type-only (no explicit search verb).");
     }
 
     // Send the rest to executor (background)
@@ -696,17 +721,24 @@ function initRecognition() {
   recognition = new SpeechRecognition();
   recognition.lang = (localStorage.getItem("lc_lang") || "en-US");
   recognition.continuous = true;
-  recognition.interimResults = true;     // we only act on finals
-  recognition.maxAlternatives = 5;
+  // Make results cleaner by only receiving finals and fewer variants
+  recognition.interimResults = false;
+  recognition.maxAlternatives = 1;
 
-  recognition.onstart = () => setStatus("Listening… say 'Hey Cat' or 'Lazy Cat'.");
+  recognition.onstart = () => {
+    processingUtterance = false; // reset guard on fresh start
+    setStatus("Listening… say 'Hey Cat' or 'Lazy Cat'.");
+  };
   recognition.onerror = (e) => setStatus("Error: " + e.error);
   recognition.onend = () => {
+    // release guard on session end before auto-restart
+    processingUtterance = false;
     if (listening) recognition.start();
     else setStatus("Stopped.");
   };
 
   recognition.onresult = (event) => {
+    if (processingUtterance) return; // ignore any late events while we're handling one
     const res = event.results[event.results.length - 1];
     if (!res || !res.isFinal) return;
 
@@ -724,13 +756,17 @@ function initRecognition() {
     }
     if (!chosen) chosen = alts.slice().sort((a, b) => b.length - a.length)[0];
 
-    const lower = chosen.toLowerCase();
+  const lower = chosen.toLowerCase();
 
     const afterWake = stripAfterWake(lower, sens);
     if (afterWake !== null) {
       if (afterWake) {
-        appendTranscript("🐱 " + afterWake);
-        aiInterpret(afterWake);
+        const cleaned = denoiseUtterance(afterWake);
+        if (cleaned) {
+          appendTranscript("🐱 " + cleaned);
+          processingUtterance = true;
+          aiInterpret(cleaned);
+        }
         wakeActive = false;
         clearWakeTimer();
         recognition.stop();
@@ -743,8 +779,12 @@ function initRecognition() {
     }
 
     if (wakeActive) {
-      appendTranscript("🐱 " + chosen);
-      aiInterpret(chosen);
+      const cleaned = denoiseUtterance(chosen);
+      if (cleaned) {
+        appendTranscript("🐱 " + cleaned);
+        processingUtterance = true;
+        aiInterpret(cleaned);
+      }
       wakeActive = false;
       clearWakeTimer();
       recognition.stop();
@@ -805,4 +845,43 @@ function sanitizeTypedText(s) {
   out = out.replace(/^['"`]\s*|\s*['"`]$/g, "");
 
   return out.trim();
+}
+
+// Explicit search intent detector: only true for clear verbs
+function isExplicitSearch(text) {
+  if (!text) return false;
+  const t = String(text).toLowerCase();
+  // order matters: check phrases before single words
+  const patterns = [
+    /\bsearch\s+for\b/,
+    /\blook\s+for\b/,
+    /\blook\s+up\b/,
+    /\bfind\b/,
+    /\bsearch\b/,
+    /\bgoogle\b/
+  ];
+  return patterns.some((re) => re.test(t));
+}
+
+// Text denoiser: remove fillers and overlapping/duplicate words to keep speech clear
+function denoiseUtterance(s) {
+  if (!s) return s;
+  let t = String(s);
+
+  // remove common fillers at boundaries or isolated
+  t = t.replace(/\b(um+|uh+|er+|ah+|like)\b\s*/gi, "");
+
+  // collapse repeated words: "open open tab" -> "open tab"
+  // do this conservatively for up to 3 repetitions
+  for (let i = 0; i < 3; i++) {
+    t = t.replace(/\b(\w+)(\s+\1\b)+/gi, "$1");
+  }
+
+  // remove duplicated functional verb pairs (open/open, click/click)
+  t = t.replace(/\b(open|click|go|scroll|type|enter|press)\s+\1\b/gi, "$1");
+
+  // trim extra spaces
+  t = t.replace(/\s{2,}/g, " ").trim();
+
+  return t;
 }
