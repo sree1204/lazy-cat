@@ -6,17 +6,18 @@
   <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
-  <header>
-    <h1>🐱 Lazy Cat</h1>
-  </header>
-
-  <section class="card">
-    <button id="btnToggle">🎤 Start Listening</button>
+  <section class="card card-current" id="current">
+    <div class="row" style="display:flex; align-items:center; gap:8px;">
+      <div class="brand" aria-label="lazy" title="lazy">lazy</div>
+      <button id="btnToggle">🎤 Start Listening</button>
+      <span id="thinking" class="thinking" style="display:none">thinking…</span>
+    </div>
+    <div id="status" class="status">Idle</div>
+    <div id="currentCmd" class="current-cmd"></div>
+    <pre id="result" class="result" aria-live="polite"></pre>
   </section>
 
-  <section class="card">
-    <pre id="transcript" aria-live="polite" aria-atomic="true" style="min-height:60px"></pre>
-  </section>
+  
 
   <script type="module" src="popup.js"></script>
 </body>
