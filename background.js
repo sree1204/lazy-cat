@@ -32,32 +32,89 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     case "scroll": {
       chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        const tabId = tabs?.[0]?.id;
+        const tab = tabs?.[0];
+        const tabId = tab?.id;
         if (!tabId) {
           sendResponse({ status: "error", message: "No active tab found" });
           return;
         }
+        
+        // Check if we're on Gmail
+        let isGmail = false;
+        try {
+          const u = new URL(tab.url || "");
+          isGmail = /(^|\.)mail\.google\.com$/i.test(u.host) || /gmail/i.test(u.host);
+        } catch (_) {}
+        
         const direction = args?.direction === "up" ? "up" : "down";
         chrome.scripting.executeScript(
           {
             target: { tabId },
-            args: [direction],
-            func: (dir) => {
-              const amount = window.innerHeight;
-              const target =
-                document.scrollingElement ||
-                document.body ||
-                document.documentElement;
-
-              if (dir === "up") {
-                target.scrollBy(0, -amount);
-              } else {
-                target.scrollBy(0, amount);
-              }
+            args: [direction, isGmail],
+            func: (dir, isGmail) => {
+              const amount = window.innerHeight * 0.8; // Scroll 80% of viewport
+              
+              const findScrollableTarget = () => {
+                if (isGmail) {
+                  // Gmail-specific scrollable containers
+                  const gmailSelectors = [
+                    'div[role="main"]', // Main content area
+                    'div.aeN', // Gmail conversation list
+                    'div[gh="tl"]', // Gmail thread list
+                    'div.Tm.aeJ', // Gmail email list container
+                    'div[data-thread-id]', // Thread container
+                    '.nH.oy8Mbf', // Gmail scrollable pane
+                    'div[role="listbox"]', // Gmail list container
+                    'div.ae4.UI' // Gmail main view
+                  ];
+                  
+                  for (const sel of gmailSelectors) {
+                    const el = document.querySelector(sel);
+                    if (el && el.scrollHeight > el.clientHeight) {
+                      return el;
+                    }
+                  }
+                  
+                  // Look for any scrollable div in Gmail
+                  const scrollableEls = Array.from(document.querySelectorAll('div'))
+                    .filter(el => {
+                      const style = getComputedStyle(el);
+                      return (style.overflow === 'auto' || style.overflow === 'scroll' || style.overflowY === 'auto' || style.overflowY === 'scroll') &&
+                             el.scrollHeight > el.clientHeight &&
+                             el.offsetWidth > 200 && el.offsetHeight > 200; // Reasonable size
+                    })
+                    .sort((a, b) => (b.scrollHeight * b.clientHeight) - (a.scrollHeight * a.clientHeight)); // Prefer larger scrollable areas
+                  
+                  if (scrollableEls.length > 0) {
+                    return scrollableEls[0];
+                  }
+                }
+                
+                // Fallback to document scrolling
+                return document.scrollingElement || document.body || document.documentElement;
+              };
+              
+              const target = findScrollableTarget();
+              if (!target) return { success: false, reason: 'no_scrollable_target' };
+              
+              const scrollAmount = dir === "up" ? -amount : amount;
+              target.scrollBy({ top: scrollAmount, behavior: "smooth" });
+              
+              return {
+                success: true,
+                target: target.tagName + (target.className ? '.' + target.className.split(' ')[0] : ''),
+                scrollTop: target.scrollTop,
+                scrollHeight: target.scrollHeight
+              };
             }
           },
-          () => {
-            sendResponse({ status: "ok", action: "scrolled", direction });
+          (results) => {
+            const res = results?.[0]?.result;
+            if (res?.success) {
+              sendResponse({ status: "ok", action: "scrolled", direction, target: res.target });
+            } else {
+              sendResponse({ status: "error", message: `Scroll failed: ${res?.reason || 'unknown'}` });
+            }
           }
         );
       });
@@ -72,108 +129,146 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
 
       chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        const tabId = tabs?.[0]?.id;
+        const tab = tabs?.[0];
+        const tabId = tab?.id;
         if (!tabId) {
           sendResponse({ status: "error", message: "No active tab found" });
           return;
         }
+        let isGmail = false;
+        try {
+          const u = new URL(tab.url || "");
+          isGmail = /(^|\.)mail\.google\.com$/i.test(u.host) || /gmail/i.test(u.host);
+        } catch (_) {}
 
-        // Try site search first. If not possible, fall back to Google.
+        // Try site search first. On Gmail, prefer in-page Enter submission and avoid external fallback.
         chrome.scripting.executeScript(
           {
             target: { tabId },
-            args: [query],
-            func: (q) => {
+            args: [query, isGmail],
+            func: (q, isGmail) => {
               const visible = (el) => !!(el && el.offsetParent !== null && !el.disabled);
+              const isEditable = (el) => {
+                if (!el) return false;
+                if (el.isContentEditable) return true;
+                if (el.tagName === "TEXTAREA") return true;
+                if (el.tagName === "INPUT") {
+                  const t = (el.type || "text").toLowerCase();
+                  return ["text", "search", "email", "tel", "url", "number"].includes(t);
+                }
+                return false;
+              };
 
-              const selectors = [
-                'input[type="search"]',
-                'input[role="searchbox"]',
-                'input[name*="search" i]',
-                'input[id*="search" i]',
-                'input[aria-label*="search" i]',
-                'input[placeholder*="search" i]',
-                '[role="search"] input',
-                'textarea[role="searchbox"]'
-              ];
+              const findTarget = () => {
+                // Broad selectors including contenteditable/combobox and common aria labels
+                const selectors = [
+                  '[role="searchbox"]',
+                  '[role="search"] input',
+                  'input[type="search"]',
+                  'input[aria-label*="search" i]',
+                  'input[placeholder*="search" i]',
+                  'input[name*="search" i]',
+                  'input[id*="search" i]',
+                  'textarea[role="searchbox"]',
+                  '[contenteditable="true"][aria-label*="search" i]',
+                  'div[role="combobox"][aria-label*="search" i]'
+                ];
 
-              let input =
-                Array.from(document.querySelectorAll(selectors.join(","))).find(visible) ||
-                Array.from(document.querySelectorAll('input[type="text"]')).find(
-                  (el) =>
-                    visible(el) &&
-                    /search|find/i.test(
-                      (el.placeholder || "") +
-                        " " +
-                        (el.getAttribute("aria-label") || "") +
-                        " " +
-                        (el.name || "") +
-                        " " +
-                        (el.id || "")
-                    )
-                );
+                let cand = Array.from(document.querySelectorAll(selectors.join(","))).filter(visible);
+                // Gmail-specific labels
+                cand = [
+                  ...cand,
+                  ...Array.from(document.querySelectorAll('[aria-label*="search in mail" i]')).filter(visible)
+                ];
 
-              if (!input) return { success: false, reason: "no_input" };
+                // Fallback to focused editable
+                const active = document.activeElement;
+                if (isEditable(active) && visible(active)) cand.unshift(active);
 
-              // Set value in a way frameworks detect
-              const proto = Object.getOwnPropertyDescriptor(
-                window.HTMLInputElement.prototype,
-                "value"
-              );
-              proto?.set?.call(input, q);
-              input.dispatchEvent(new Event("input", { bubbles: true }));
-              input.dispatchEvent(new Event("change", { bubbles: true }));
+                // Filter to editable elements
+                cand = cand.filter(isEditable);
 
-              // Submit via form if available
-              let form = input.form || input.closest("form");
-              if (form && typeof form.submit === "function") {
+                // Prefer ones inside role=search
+                cand.sort((a, b) => {
+                  const aIn = a.closest && a.closest('[role="search"]') ? 1 : 0;
+                  const bIn = b.closest && b.closest('[role="search"]') ? 1 : 0;
+                  return bIn - aIn;
+                });
+
+                return cand[0] || null;
+              };
+
+              let target = findTarget();
+
+              // On Gmail, try '/' shortcut to focus search if not found
+              if (isGmail && !target) {
+                const sendSlash = (type) => document.dispatchEvent(new KeyboardEvent(type, { key: '/', code: 'Slash', keyCode: 191, which: 191, bubbles: true, cancelable: true }));
+                sendSlash('keydown'); sendSlash('keypress'); sendSlash('keyup');
+                // after shortcut, new activeElement may be the search box
+                const ae = document.activeElement;
+                if (isEditable(ae) && visible(ae)) target = ae;
+              }
+
+              if (!target) return { success: false, reason: "no_input" };
+
+              // Focus and set value/text
+              target.focus({ preventScroll: true });
+              const fire = (el) => {
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+              };
+              if (target.isContentEditable) {
+                target.innerText = q;
+                fire(target);
+              } else if (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT') {
+                const proto = target.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+                const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+                desc?.set?.call(target, q);
+                fire(target);
+              } else {
+                target.textContent = q;
+                fire(target);
+              }
+
+              // Submission behavior
+              if (isGmail) {
+                // Gmail works with Enter; avoid form.submit to prevent reload
+                const press = (type, el) => el.dispatchEvent(new KeyboardEvent(type, { bubbles: true, cancelable: true, key: 'Enter', code: 'Enter', keyCode: 13, which: 13 }));
+                press('keydown', target); press('keypress', target); press('keyup', target);
+                return { success: true, method: 'gmail_enter' };
+              }
+
+              // Generic: try form submission, then button, then Enter
+              const form = target.form || target.closest?.('form');
+              if (form && typeof form.requestSubmit === 'function') {
+                form.requestSubmit();
+                return { success: true, method: 'form_requestSubmit' };
+              }
+              if (form && typeof form.submit === 'function') {
                 form.submit();
-                return { success: true, method: "form" };
+                return { success: true, method: 'form_submit' };
               }
-
-              // Try click a submit/search button
-              const btn =
-                input
-                  .closest("form")
-                  ?.querySelector('button[type="submit"], input[type="submit"]') ||
-                document.querySelector(
-                  'button[aria-label*="search" i], button[type="submit"], input[type="submit"]'
-                );
-
-              if (btn) {
-                btn.click();
-                return { success: true, method: "button" };
-              }
-
-              // Simulate Enter key
-              const press = (type) =>
-                input.dispatchEvent(
-                  new KeyboardEvent(type, {
-                    key: "Enter",
-                    keyCode: 13,
-                    which: 13,
-                    bubbles: true
-                  })
-                );
-              press("keydown");
-              press("keypress");
-              press("keyup");
-              return { success: true, method: "enter" };
+              const btn = form?.querySelector('button[type="submit"], input[type="submit"]') || document.querySelector('button[aria-label*="search" i], button[type="submit"], input[type="submit"]');
+              if (btn) { btn.click(); return { success: true, method: 'button' }; }
+              const press = (type, el) => el.dispatchEvent(new KeyboardEvent(type, { bubbles: true, cancelable: true, key: 'Enter', code: 'Enter', keyCode: 13, which: 13 }));
+              press('keydown', target); press('keypress', target); press('keyup', target);
+              return { success: true, method: 'enter' };
             }
           },
           (results) => {
-            const ok = Array.isArray(results) && results[0]?.result?.success;
+            const res = Array.isArray(results) ? results[0]?.result : null;
+            const ok = !!res?.success;
             if (ok) {
-              sendResponse({ status: "ok", action: "search_in_page", query });
+              sendResponse({ status: "ok", action: "search_in_page", query, method: res?.method });
             } else {
-              const google =
-                "https://www.google.com/search?q=" + encodeURIComponent(query);
-              chrome.tabs.create({ url: google });
-              sendResponse({
-                status: "ok",
-                action: "search_google_fallback",
-                query
-              });
+              if (isGmail) {
+                // Do not open Google when on Gmail; report failure so UI knows
+                sendResponse({ status: "error", message: "gmail_search_not_found", query });
+              } else {
+                const google = "https://www.google.com/search?q=" + encodeURIComponent(query);
+                chrome.tabs.create({ url: google });
+                sendResponse({ status: "ok", action: "search_google_fallback", query });
+              }
             }
           }
         );
@@ -522,20 +617,78 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     case "scroll_bottom": {
       chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        const tabId = tabs?.[0]?.id;
+        const tab = tabs?.[0];
+        const tabId = tab?.id;
         if (!tabId) {
           sendResponse({ status: "error", message: "No active tab found" });
           return;
         }
+        
+        // Check if we're on Gmail
+        let isGmail = false;
+        try {
+          const u = new URL(tab.url || "");
+          isGmail = /(^|\.)mail\.google\.com$/i.test(u.host) || /gmail/i.test(u.host);
+        } catch (_) {}
+        
         chrome.scripting.executeScript(
           {
             target: { tabId },
-            func: () => {
-              const target = document.scrollingElement || document.body || document.documentElement;
-              if (target) target.scrollTo({ top: target.scrollHeight, behavior: "smooth" });
+            args: [isGmail],
+            func: (isGmail) => {
+              const findScrollableTarget = () => {
+                if (isGmail) {
+                  const gmailSelectors = [
+                    'div[role="main"]',
+                    'div.aeN',
+                    'div[gh="tl"]',
+                    'div.Tm.aeJ',
+                    'div[data-thread-id]',
+                    '.nH.oy8Mbf',
+                    'div[role="listbox"]',
+                    'div.ae4.UI'
+                  ];
+                  
+                  for (const sel of gmailSelectors) {
+                    const el = document.querySelector(sel);
+                    if (el && el.scrollHeight > el.clientHeight) {
+                      return el;
+                    }
+                  }
+                  
+                  const scrollableEls = Array.from(document.querySelectorAll('div'))
+                    .filter(el => {
+                      const style = getComputedStyle(el);
+                      return (style.overflow === 'auto' || style.overflow === 'scroll' || style.overflowY === 'auto' || style.overflowY === 'scroll') &&
+                             el.scrollHeight > el.clientHeight &&
+                             el.offsetWidth > 200 && el.offsetHeight > 200;
+                    })
+                    .sort((a, b) => (b.scrollHeight * b.clientHeight) - (a.scrollHeight * a.clientHeight));
+                  
+                  if (scrollableEls.length > 0) {
+                    return scrollableEls[0];
+                  }
+                }
+                
+                return document.scrollingElement || document.body || document.documentElement;
+              };
+              
+              const target = findScrollableTarget();
+              if (target) {
+                target.scrollTo({ top: target.scrollHeight, behavior: "smooth" });
+                return { success: true, target: target.tagName };
+              }
+              return { success: false, reason: 'no_target' };
             }
           },
-          () => sendResponse({ status: "ok", action: "scrolled_bottom" })
+          (results) => {
+            const res = results?.[0]?.result;
+            if (res?.success) {
+              sendResponse({ status: "ok", action: "scrolled_bottom" });
+            } else {
+              sendResponse({ status: "error", message: "Scroll to bottom failed" });
+            }
+          }
         );
       });
       return true;
@@ -543,20 +696,78 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     case "scroll_top": {
       chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        const tabId = tabs?.[0]?.id;
+        const tab = tabs?.[0];
+        const tabId = tab?.id;
         if (!tabId) {
           sendResponse({ status: "error", message: "No active tab found" });
           return;
         }
+        
+        // Check if we're on Gmail
+        let isGmail = false;
+        try {
+          const u = new URL(tab.url || "");
+          isGmail = /(^|\.)mail\.google\.com$/i.test(u.host) || /gmail/i.test(u.host);
+        } catch (_) {}
+        
         chrome.scripting.executeScript(
           {
             target: { tabId },
-            func: () => {
-              const target = document.scrollingElement || document.body || document.documentElement;
-              if (target) target.scrollTo({ top: 0, behavior: "smooth" });
+            args: [isGmail],
+            func: (isGmail) => {
+              const findScrollableTarget = () => {
+                if (isGmail) {
+                  const gmailSelectors = [
+                    'div[role="main"]',
+                    'div.aeN',
+                    'div[gh="tl"]',
+                    'div.Tm.aeJ',
+                    'div[data-thread-id]',
+                    '.nH.oy8Mbf',
+                    'div[role="listbox"]',
+                    'div.ae4.UI'
+                  ];
+                  
+                  for (const sel of gmailSelectors) {
+                    const el = document.querySelector(sel);
+                    if (el && el.scrollHeight > el.clientHeight) {
+                      return el;
+                    }
+                  }
+                  
+                  const scrollableEls = Array.from(document.querySelectorAll('div'))
+                    .filter(el => {
+                      const style = getComputedStyle(el);
+                      return (style.overflow === 'auto' || style.overflow === 'scroll' || style.overflowY === 'auto' || style.overflowY === 'scroll') &&
+                             el.scrollHeight > el.clientHeight &&
+                             el.offsetWidth > 200 && el.offsetHeight > 200;
+                    })
+                    .sort((a, b) => (b.scrollHeight * b.clientHeight) - (a.scrollHeight * a.clientHeight));
+                  
+                  if (scrollableEls.length > 0) {
+                    return scrollableEls[0];
+                  }
+                }
+                
+                return document.scrollingElement || document.body || document.documentElement;
+              };
+              
+              const target = findScrollableTarget();
+              if (target) {
+                target.scrollTo({ top: 0, behavior: "smooth" });
+                return { success: true, target: target.tagName };
+              }
+              return { success: false, reason: 'no_target' };
             }
           },
-          () => sendResponse({ status: "ok", action: "scrolled_top" })
+          (results) => {
+            const res = results?.[0]?.result;
+            if (res?.success) {
+              sendResponse({ status: "ok", action: "scrolled_top" });
+            } else {
+              sendResponse({ status: "error", message: "Scroll to top failed" });
+            }
+          }
         );
       });
       return true;
@@ -736,6 +947,769 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         } catch (err) {
           sendResponse({ status: "error", message: err.message });
         }
+      });
+      return true;
+    }
+
+    case "translate_page": {
+      // Open a translated view using Google Translate web. Default language 'en' when not provided.
+      const targetLangRaw = (args?.lang || "en").toString().trim();
+      // Basic normalization: accept common names/codes
+      const norm = (s) => s.toLowerCase().trim();
+      const map = {
+        english: "en", en: "en",
+        spanish: "es", es: "es",
+        french: "fr", fr: "fr",
+        german: "de", de: "de",
+        hindi: "hi", hi: "hi",
+        telugu: "te", te: "te",
+        tamil: "ta", ta: "ta",
+        chinese: "zh-CN", "zh-cn": "zh-CN", zh: "zh-CN",
+        japanese: "ja", ja: "ja",
+        korean: "ko", ko: "ko",
+        arabic: "ar", ar: "ar",
+        portuguese: "pt", pt: "pt",
+        russian: "ru", ru: "ru",
+        italian: "it", it: "it"
+      };
+      const lang = map[norm(targetLangRaw)] || targetLangRaw;
+
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const tab = tabs?.[0];
+        if (!tab?.url) {
+          sendResponse({ status: "error", message: "No active tab URL" });
+          return;
+        }
+        const src = encodeURIComponent(tab.url);
+        const url = `https://translate.google.com/translate?sl=auto&tl=${encodeURIComponent(lang)}&u=${src}`;
+        chrome.tabs.create({ url }, (newTab) => {
+          if (chrome.runtime.lastError) {
+            sendResponse({ status: "error", message: chrome.runtime.lastError.message });
+          } else {
+            sendResponse({ status: "ok", action: "translate_page", lang, tabId: newTab?.id, url });
+          }
+        });
+      });
+      return true; // async
+    }
+
+    case "open_email": {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const tab = tabs?.[0];
+        if (!tab?.id || !tab?.url) {
+          sendResponse({ status: "error", message: "No active tab found" });
+          return;
+        }
+        
+        // Check if we're on Gmail
+        let isGmail = false;
+        try {
+          const u = new URL(tab.url);
+          isGmail = /(^|\.)mail\.google\.com$/i.test(u.host) || /gmail/i.test(u.host);
+        } catch (_) {}
+        
+        if (!isGmail) {
+          sendResponse({ status: "error", message: "open_email only works on Gmail" });
+          return;
+        }
+
+        chrome.scripting.executeScript(
+          {
+            target: { tabId: tab.id },
+            args: [args],
+            func: (emailArgs) => {
+              const { index, sender, subject, rawUtterance } = emailArgs || {};
+
+              // Helpers
+              const visible = (el) => !!(el && el.offsetParent !== null && !el.disabled);
+              const normalize = (s) => (s || "").toLowerCase().replace(/\s+/g, " ").trim();
+              const byTop = (a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top;
+              const dedupe = (arr) => Array.from(new Set(arr));
+
+              // Parse ordinal index from the utterance (1-based). Supports: 1st/2nd/3rd/10th, first/second/third, twenty first, bare numbers.
+              const parseOrdinalFromUtterance = (text) => {
+                if (!text) return null;
+                const t = normalize(text);
+                const m1 = t.match(/\b(\d+)(st|nd|rd|th)\b/);
+                if (m1) { const n = parseInt(m1[1], 10); if (Number.isFinite(n) && n > 0) return n; }
+                const m2 = t.match(/\b(?:open|go\s*to|select|click)\s+(?:the\s+)?(\d{1,3})\b/);
+                if (m2) { const n = parseInt(m2[1], 10); if (Number.isFinite(n) && n > 0) return n; }
+                const words = t.split(/[^a-z0-9]+/i).filter(Boolean);
+                const card = { one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10, eleven:11,twelve:12,thirteen:13,fourteen:14,fifteen:15,sixteen:16,seventeen:17,eighteen:18,nineteen:19, twenty:20,thirty:30,forty:40,fifty:50,sixty:60,seventy:70,eighty:80,ninety:90 };
+                const ord = { first:1,second:2,third:3,fourth:4,fifth:5,sixth:6,seventh:7,eighth:8,ninth:9,tenth:10, eleventh:11,twelfth:12,thirteenth:13,fourteenth:14,fifteenth:15,sixteenth:16,seventeenth:17,eighteenth:18,nineteenth:19, twentieth:20,thirtieth:30,fortieth:40,fiftieth:50,sixtieth:60,seventieth:70,eightieth:80,ninetieth:90, last:-1 };
+                for (const w of words) { if (ord[w] != null) return ord[w]; }
+                for (let i = 0; i < words.length - 1; i++) {
+                  const a = words[i], b = words[i+1];
+                  if (card[a] && ord[b] && ord[b] < 10) return card[a] + ord[b];
+                }
+                return null;
+              };
+
+              // Find email rows strictly as visible message rows and sort by on-screen order
+              const findEmailRows = () => {
+                const preferred = [
+                  'tr.zA',
+                  'div[role="listitem"][data-thread-id]',
+                  'div[role="listitem"][data-legacy-thread-id]',
+                  'div[data-thread-id]',
+                  'div[data-legacy-thread-id]'
+                ];
+                let rows = [];
+                for (const sel of preferred) {
+                  rows = rows.concat(Array.from(document.querySelectorAll(sel)).filter(visible));
+                }
+                if (!rows.length) {
+                  rows = rows.concat(Array.from(document.querySelectorAll('tr[role="row"], div[role="listitem"]')).filter(visible));
+                }
+                rows = dedupe(rows).filter((row) => {
+                  const t = normalize(row.innerText || "");
+                  if (!t || t.length < 8) return false;
+                  if (/^primary$|^social$|^promotions$|^updates$|^forums$/.test(t)) return false;
+                  return true;
+                }).sort(byTop);
+                return rows;
+              };
+
+              const emailRows = findEmailRows();
+              if (!emailRows.length) return { success: false, reason: 'no_emails_found' };
+
+              let targetRow = null;
+
+              // If sender/subject filters exist, use those first
+              if (sender || subject) {
+                const sNorm = normalize(sender);
+                const subNorm = normalize(subject);
+                for (const row of emailRows) {
+                  const text = normalize(row.innerText || "");
+                  let matches = true;
+                  if (sender) {
+                    if (!text.includes(sNorm)) {
+                      const words = (sNorm || '').split(' ').filter(Boolean);
+                      matches = words.some(w => w.length >= 2 && text.includes(w));
+                    }
+                  }
+                  if (matches && subject) {
+                    if (!text.includes(subNorm)) {
+                      const words = (subNorm || '').split(' ').filter(Boolean);
+                      matches = words.some(w => w.length >= 2 && text.includes(w));
+                    }
+                  }
+                  if (matches) { targetRow = row; break; }
+                }
+              }
+
+              // Resolve index: prefer ordinal parsed from utterance, then provided index
+              let resolvedIndex = null;
+              const utterIdx = parseOrdinalFromUtterance(rawUtterance);
+              if (utterIdx != null) resolvedIndex = utterIdx;
+              else if (Number.isFinite(index) && index > 0) resolvedIndex = Math.floor(index);
+              if (resolvedIndex === -1) resolvedIndex = emailRows.length; // 'last'
+
+              if (!targetRow && resolvedIndex && resolvedIndex > 0) {
+                const zero = Math.min(Math.max(1, resolvedIndex) - 1, emailRows.length - 1);
+                targetRow = emailRows[zero];
+              }
+
+              if (!targetRow) targetRow = emailRows[0];
+              if (!targetRow) return { success: false, reason: 'no_matching_email' };
+
+              // Subject extraction
+              let extractedSubject = 'Email';
+              try {
+                const subjNode = targetRow.querySelector('.bog, .y6, [role="link"] span, a span');
+                extractedSubject = (subjNode?.innerText || targetRow.innerText || '').split('\n')[0].trim() || 'Email';
+              } catch (_) {}
+
+              // Clickable target
+              const clickable = targetRow.querySelector('a[href^="#"], a[role="link"], a, [role="link"]') || targetRow;
+
+              // Highlight and click
+              const prev = targetRow.style.outline;
+              targetRow.style.outline = '2px solid #1a73e8';
+              targetRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              setTimeout(() => { try { targetRow.style.outline = prev || ''; } catch(_){} }, 800);
+
+              try {
+                clickable.click();
+                return { success: true, subject: extractedSubject, method: 'click', element: clickable.tagName };
+              } catch (_) {
+                return { success: false, reason: 'no_clickable_element' };
+              }
+            }
+          },
+          (results) => {
+            const res = results?.[0]?.result;
+            if (res?.success) {
+              sendResponse({ 
+                status: "ok", 
+                action: "opened_email", 
+                subject: res.subject,
+                method: res.method 
+              });
+            } else {
+              sendResponse({ 
+                status: "error", 
+                message: `Failed to open email: ${res?.reason || "unknown"}` 
+              });
+            }
+          }
+        );
+      });
+      return true; // async
+    }
+
+    case "open_gmail_section": {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const tab = tabs?.[0];
+        if (!tab?.id || !tab?.url) {
+          sendResponse({ status: "error", message: "No active tab found" });
+          return;
+        }
+
+        let isGmail = false;
+        try {
+          const u = new URL(tab.url);
+          isGmail = /(^|\.)mail\.google\.com$/i.test(u.host) || /gmail/i.test(u.host);
+        } catch (_) {}
+        if (!isGmail) {
+          sendResponse({ status: "error", message: "open_gmail_section only works on Gmail" });
+          return;
+        }
+
+        const section = (args?.section || "").toString().toLowerCase().trim();
+        if (!section) {
+          sendResponse({ status: "error", message: "Missing section" });
+          return;
+        }
+
+        chrome.scripting.executeScript(
+          {
+            target: { tabId: tab.id },
+            args: [section],
+            func: async (sec) => {
+              const normalize = (s) => (s || "").toLowerCase().replace(/\s+/g, " ").trim();
+              const visible = (el) => !!(el && el.offsetParent !== null && !el.disabled);
+
+              const synonyms = {
+                inbox: ["inbox", "primary"],
+                spam: ["spam", "junk"],
+                drafts: ["drafts", "draft"],
+                sent: ["sent", "sent mail", "sent messages"],
+                important: ["important"],
+                starred: ["starred"],
+                all: ["all mail", "all"],
+                trash: ["trash", "bin"],
+                snoozed: ["snoozed"],
+                scheduled: ["scheduled"],
+                promotions: ["promotions"],
+                social: ["social"],
+                updates: ["updates"],
+                forums: ["forums"]
+              };
+
+              // Build a set of acceptable labels to match
+              const wanted = new Set();
+              for (const [key, vals] of Object.entries(synonyms)) {
+                if (key === sec) vals.forEach(v => wanted.add(v));
+              }
+              if (!wanted.size) {
+                // If unknown token, try to match it directly
+                wanted.add(sec);
+              }
+
+              const isCategory = ["promotions","social","updates","forums","primary"].includes(sec);
+
+              // If this is a top category, first try the top [role=tab] buttons
+              if (isCategory) {
+                const tabs = Array.from(document.querySelectorAll('[role="tab"]')).filter(visible);
+                const readLabel = (el) => {
+                  const attrs = [
+                    el.getAttribute?.('aria-label'),
+                    el.getAttribute?.('data-tooltip'),
+                    el.getAttribute?.('title'),
+                    el.textContent
+                  ];
+                  return normalize(attrs.filter(Boolean).join(' ').trim());
+                };
+                const scoreTab = (lab) => {
+                  let s = 0; lab = normalize(lab);
+                  wanted.forEach(w => {
+                    if (lab === w) s += 120; // stronger for tabs
+                    else if (lab.startsWith(w)) s += 80;
+                    else if (lab.includes(w)) s += 60;
+                  });
+                  return s;
+                };
+                let best = null, bestScore = -1;
+                for (const el of tabs) {
+                  const lab = readLabel(el);
+                  if (!lab) continue;
+                  const sc = scoreTab(lab);
+                  if (sc > bestScore) { best = { el, lab }; bestScore = sc; }
+                }
+                if (best && bestScore >= 60) {
+                  try {
+                    best.el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    best.el.click();
+                    return { success: true, section: sec, label: best.lab, via: 'tab' };
+                  } catch (_) { /* fall through to left-nav scan */ }
+                }
+              }
+
+              // Query left nav and general document
+              const containers = [ document ];
+
+              let candidates = [];
+
+              const pushIf = (el, label) => {
+                if (!el || !visible(el)) return;
+                const l = normalize(
+                  label ||
+                  el.getAttribute?.('aria-label') ||
+                  el.getAttribute?.('data-tooltip') ||
+                  el.getAttribute?.('title') ||
+                  el.textContent || ""
+                );
+                if (!l) return;
+                candidates.push({ el, label: l });
+              };
+
+              // Left nav items often are links or divs with aria-label or title
+              const selectors = [
+                'a[aria-label]', 'a[title]', 'a[href]', 'div[aria-label]', 'div[role="tab"]', 'div[role="link"]', 'span[aria-label]'
+              ];
+              for (const sel of selectors) {
+                containers.forEach(root => {
+                  document.querySelectorAll(sel).forEach(el => pushIf(el));
+                });
+              }
+
+              // Score and pick best match
+              const score = (lab) => {
+                lab = normalize(lab);
+                let s = 0;
+                wanted.forEach(w => {
+                  if (lab === w) s += 100;
+                  else if (lab.startsWith(w)) s += 60;
+                  else if (lab.includes(w)) s += 40;
+                });
+                return s;
+              };
+
+              const findBest = () => {
+                let best = null, bestScore = -1;
+                for (const c of candidates) {
+                  const sc = score(c.label);
+                  if (sc > bestScore) { best = c; bestScore = sc; }
+                }
+                return best && bestScore >= 40 ? best : null;
+              };
+
+              let best = findBest();
+              if (best) {
+                try { best.el.scrollIntoView({ behavior: 'smooth', block: 'center' }); best.el.click(); return { success: true, section: sec, label: best.label, via: 'nav' }; }
+                catch { /* continue to expand more */ }
+              }
+
+              // Try expanding 'More' to reveal hidden folders
+              const findNavContainers = () => {
+                const cands = [];
+                const sels = [
+                  'div[role="navigation"]',
+                  'nav[role="navigation"]',
+                  'div[aria-label*="nav" i]',
+                  'div[aria-label*="menu" i]',
+                  'div[gh="nv"]'
+                ];
+                for (const s of sels) {
+                  document.querySelectorAll(s).forEach(el => { if (visible(el)) cands.push(el); });
+                }
+                return cands.length ? cands : [document.body || document];
+              };
+
+              const maybeClickMore = () => {
+                const roots = findNavContainers();
+                const all = [];
+                const selAll = '[role="button"], button, a, div, span';
+                for (const r of roots) {
+                  r.querySelectorAll(selAll).forEach(el => { if (visible(el)) all.push(el); });
+                }
+                for (const el of all) {
+                  const lab = normalize(
+                    el.getAttribute?.('aria-label') ||
+                    el.getAttribute?.('data-tooltip') ||
+                    el.getAttribute?.('title') ||
+                    el.textContent || ''
+                  );
+                  if (!lab) continue;
+                  // Must include 'more' and NOT include 'less'
+                  if (/\bmore\b/i.test(lab) && !/\bless\b/i.test(lab)) {
+                    try { el.scrollIntoView({ behavior:'smooth', block:'center' }); el.click(); return true; } catch { /* noop */ }
+                  }
+                }
+                return false;
+              };
+
+              const tryExpandAndReselect = async () => {
+                const expanded = maybeClickMore();
+                if (!expanded) return null;
+                await new Promise(r => setTimeout(r, 400));
+                candidates = [];
+                for (const sel of selectors) {
+                  containers.forEach(root => { document.querySelectorAll(sel).forEach(el => pushIf(el)); });
+                }
+                return findBest();
+              };
+
+              let bestAfterMore = await tryExpandAndReselect();
+              if (bestAfterMore) {
+                try { bestAfterMore.el.scrollIntoView({ behavior: 'smooth', block: 'center' }); bestAfterMore.el.click(); return { success: true, section: sec, label: bestAfterMore.label, via: 'nav+more' }; }
+                catch { /* continue to fallback */ }
+              }
+
+              // One more attempt in case there are nested 'More' toggles
+              bestAfterMore = await tryExpandAndReselect();
+              if (bestAfterMore) {
+                try { bestAfterMore.el.scrollIntoView({ behavior: 'smooth', block: 'center' }); bestAfterMore.el.click(); return { success: true, section: sec, label: bestAfterMore.label, via: 'nav+more2' }; }
+                catch { /* continue to fallback */ }
+              }
+
+              // Try direct anchor links with hashes present in DOM
+              const anchorMap = {
+                promotions: '#category/promo',
+                social: '#category/social',
+                updates: '#category/updates',
+                forums: '#category/forums',
+                spam: '#spam',
+                drafts: '#drafts',
+                sent: '#sent',
+                important: '#imp',
+                starred: '#starred',
+                all: '#all',
+                trash: '#trash',
+                bin: '#trash',
+                inbox: '#inbox',
+                primary: '#inbox'
+              };
+              const targetAnchorHash = anchorMap[sec];
+              if (targetAnchorHash) {
+                const a = document.querySelector(`a[href*="${CSS.escape(targetAnchorHash)}"]`);
+                if (a && visible(a)) {
+                  try { a.scrollIntoView({ behavior:'smooth', block:'center' }); a.click(); return { success:true, section: sec, via:'anchor', label: targetAnchorHash }; } catch { /* fall through */ }
+                }
+              }
+
+              // Final fallback: navigate via Gmail hash routes
+              const routeMap = {
+                inbox: '#inbox',
+                primary: '#inbox',
+                spam: '#spam',
+                drafts: '#drafts',
+                sent: '#sent',
+                important: '#imp',
+                starred: '#starred',
+                all: '#all',
+                trash: '#trash',
+                bin: '#trash',
+                snoozed: '#snoozed',
+                scheduled: '#scheduled',
+                promotions: '#category/promo',
+                social: '#category/social',
+                updates: '#category/updates',
+                forums: '#category/forums'
+              };
+              const targetHash = routeMap[sec];
+              if (targetHash) {
+                try {
+                  const u = new URL(window.location.href);
+                  if (u.hash !== targetHash) {
+                    u.hash = targetHash;
+                    window.location.assign(u.toString());
+                  } else {
+                    // force reload of the same hash
+                    window.location.reload();
+                  }
+                  return { success: true, section: sec, via: 'hash', label: targetHash };
+                } catch (_) {
+                  // fallback to setting hash directly
+                  try { window.location.hash = targetHash; return { success: true, section: sec, via: 'hash2', label: targetHash }; }
+                  catch { return { success: false, reason: 'route_nav_failed' }; }
+                }
+              }
+
+              return { success: false, reason: 'section_not_found' };
+            }
+          },
+          (results) => {
+            const res = results?.[0]?.result;
+            if (res?.success) {
+              sendResponse({ status: 'ok', action: 'opened_gmail_section', section: args?.section, label: res.label });
+            } else {
+              sendResponse({ status: 'error', message: res?.reason || 'section_open_failed' });
+            }
+          }
+        );
+      });
+      return true;
+    }
+
+    case "gmail_reply": {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const tab = tabs?.[0];
+        if (!tab?.id || !tab?.url) {
+          sendResponse({ status: "error", message: "No active tab found" });
+          return;
+        }
+        let isGmail = false;
+        try { const u = new URL(tab.url); isGmail = /(^|\.)mail\.google\.com$/i.test(u.host) || /gmail/i.test(u.host); } catch(_){}
+        if (!isGmail) { sendResponse({ status: "error", message: "gmail_reply only works on Gmail" }); return; }
+
+        const mode = (args?.mode === 'reply_all') ? 'reply_all' : 'reply';
+
+        chrome.scripting.executeScript(
+          {
+            target: { tabId: tab.id },
+            args: [mode],
+            func: (replyMode) => {
+              const visible = (el) => !!(el && el.offsetParent !== null && !el.disabled);
+              const normalize = (s) => (s||'').toLowerCase().replace(/\s+/g,' ').trim();
+
+              // If a compose box is already open for this thread, focus it
+              const compose = document.querySelector('div[role="textbox"], div[aria-label="Message Body"]');
+              if (compose && visible(compose)) {
+                try { compose.focus(); return { success:true, method:'focus_compose' }; } catch(_){}
+              }
+
+              // Look for reply buttons within a conversation view
+              const candidates = [];
+              const pushIf = (el) => { if (el && visible(el)) candidates.push(el); };
+              const selectors = [
+                'div[role="button"][data-tooltip*="Reply" i]',
+                'div[role="button"][aria-label*="Reply" i]',
+                'span[role="button"][aria-label*="Reply" i]',
+                'div[role="button"][data-tooltip*="Reply all" i]',
+                'div[role="button"][aria-label*="Reply all" i]'
+              ];
+              selectors.forEach(sel => document.querySelectorAll(sel).forEach(pushIf));
+
+              const score = (el) => {
+                const lab = normalize(el.getAttribute('aria-label') || el.getAttribute('data-tooltip') || el.title || el.textContent);
+                let s = 0;
+                if (replyMode === 'reply_all') {
+                  if (/\breply all\b/i.test(lab)) s += 100;
+                  if (/\breply\b/i.test(lab)) s += 40;
+                } else {
+                  if (/\breply all\b/i.test(lab)) s += 30; // lower than plain reply
+                  if (/\breply\b/i.test(lab)) s += 100;
+                }
+                return s;
+              };
+
+              let best = null, bestScore = -1;
+              for (const el of candidates) {
+                const sc = score(el);
+                if (sc > bestScore) { best = el; bestScore = sc; }
+              }
+
+              if (best && bestScore >= 60) {
+                try { best.scrollIntoView({ behavior:'smooth', block:'center' }); best.click(); return { success:true, method:'click_button' }; }
+                catch(_){}
+              }
+
+              // Keyboard fallback: 'r' for reply, 'a' for reply all
+              try {
+                const key = replyMode === 'reply_all' ? 'a' : 'r';
+                const press = (type) => document.dispatchEvent(new KeyboardEvent(type, { bubbles:true, cancelable:true, key, code: key.toUpperCase(), keyCode: key.charCodeAt(0), which: key.charCodeAt(0) }));
+                press('keydown'); press('keypress'); press('keyup');
+                return { success:true, method:'keyboard' };
+              } catch(_){}
+
+              return { success:false, reason:'reply_controls_not_found' };
+            }
+          },
+          (results) => {
+            const res = results?.[0]?.result;
+            if (res?.success) {
+              sendResponse({ status:'ok', action:'gmail_reply', method: res.method, mode });
+            } else {
+              sendResponse({ status:'error', message: res?.reason || 'gmail_reply_failed' });
+            }
+          }
+        );
+      });
+      return true;
+    }
+
+    case "gmail_forward": {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const tab = tabs?.[0];
+        if (!tab?.id || !tab?.url) { sendResponse({ status:"error", message:"No active tab found" }); return; }
+        let isGmail=false; try { const u=new URL(tab.url); isGmail=/(^|\.)mail\.google\.com$/i.test(u.host)||/gmail/i.test(u.host);} catch(_){ }
+        if (!isGmail) { sendResponse({ status:"error", message:"gmail_forward only works on Gmail"}); return; }
+        const recips = { to: args?.to||[], cc: args?.cc||[], bcc: args?.bcc||[] };
+        chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          args: [recips],
+          func: async (recips) => {
+            const visible = (el)=>!!(el&&el.offsetParent!==null&&!el.disabled);
+            const normalize=(s)=>(s||'').toLowerCase();
+            // Find Forward button and click
+            const btnSel = [
+              'div[role="button"][data-tooltip*="Forward" i]',
+              'div[role="button"][aria-label*="Forward" i]',
+              'span[role="button"][aria-label*="Forward" i]'
+            ].join(',');
+            let btn = Array.from(document.querySelectorAll(btnSel)).find(visible);
+            if (!btn) {
+              // Sometimes under overflow menu (three-dots)
+              const more = Array.from(document.querySelectorAll('div[role="button"][aria-label*="More" i], div[role="button"][data-tooltip*="More" i]')).find(visible);
+              try { more?.click(); await new Promise(r=>setTimeout(r,200)); } catch(_){ }
+              btn = Array.from(document.querySelectorAll(btnSel)).find(visible);
+            }
+            try { btn?.scrollIntoView({behavior:'smooth',block:'center'}); btn?.click(); } catch(_){ }
+            // Wait for compose area
+            await new Promise(r=>setTimeout(r,350));
+
+            // Fill recipients if provided
+            const fill = (fieldLabel, values) => {
+              if (!values?.length) return 0;
+              // Reveal Cc/Bcc fields if needed
+              const reveal = Array.from(document.querySelectorAll('span[role="link"], div[role="button"]'))
+                .find(el => /\bcc\b|\bbcc\b/i.test(el.textContent||''));
+              try { if (reveal) reveal.click(); } catch(_){ }
+              let count = 0;
+              const tagSel = 'input[aria-label*="To" i], input[aria-label*="Cc" i], input[aria-label*="Bcc" i]';
+              const inputs = Array.from(document.querySelectorAll(tagSel));
+              const matchField = (label) => inputs.find(el => /input/i.test(el.tagName) && normalize(el.getAttribute('aria-label')||'').includes(label));
+              const target = matchField(fieldLabel);
+              if (target) {
+                target.focus();
+                for (const v of values) {
+                  target.value = '';
+                  target.dispatchEvent(new Event('input',{bubbles:true}));
+                  target.value = v;
+                  target.dispatchEvent(new Event('input',{bubbles:true}));
+                  // press Enter or comma to commit chip
+                  target.dispatchEvent(new KeyboardEvent('keydown',{bubbles:true,cancelable:true,key:'Enter',code:'Enter',keyCode:13,which:13}));
+                  target.dispatchEvent(new KeyboardEvent('keyup',{bubbles:true,cancelable:true,key:'Enter',code:'Enter',keyCode:13,which:13}));
+                  count++;
+                }
+              }
+              return count;
+            };
+            const added = {
+              to: fill('to', recips.to),
+              cc: fill('cc', recips.cc),
+              bcc: fill('bcc', recips.bcc)
+            };
+            return { success:true, action:'forward', added };
+          }
+        }, (results)=>{
+          const res = results?.[0]?.result;
+          if (res?.success) sendResponse({ status:'ok', action:'gmail_forward', info: res });
+          else sendResponse({ status:'error', message: res?.reason || 'gmail_forward_failed' });
+        });
+      });
+      return true;
+    }
+
+    case "gmail_update_recipients": {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const tab = tabs?.[0]; if (!tab?.id||!tab?.url){ sendResponse({status:'error', message:'No active tab found'}); return; }
+        let isGmail=false; try{ const u=new URL(tab.url); isGmail=/(^|\.)mail\.google\.com$/i.test(u.host)||/gmail/i.test(u.host);}catch(_){ }
+        if (!isGmail) { sendResponse({ status:'error', message:'gmail_update_recipients only works on Gmail' }); return; }
+        const payload = {
+          toAdd: args?.toAdd||[], ccAdd: args?.ccAdd||[], bccAdd: args?.bccAdd||[],
+          toRemove: args?.toRemove||[], ccRemove: args?.ccRemove||[], bccRemove: args?.bccRemove||[]
+        };
+        chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          args: [payload],
+          func: (p) => {
+            const normalize=(s)=>(s||'').toLowerCase();
+            const visible = (el)=>!!(el&&el.offsetParent!==null&&!el.disabled);
+            const inputs = Array.from(document.querySelectorAll('input[aria-label]'));
+            const chipsSel = 'div[role="listitem"][data-hovercard-id], span[email], div[role="listitem"][aria-label*="Remove"]';
+            const typeIn = (label, values)=>{
+              if (!values?.length) return 0;
+              const field = inputs.find(el=>normalize(el.getAttribute('aria-label')).includes(label));
+              if (!field) return 0;
+              field.focus();
+              let c=0;
+              for (const v of values) {
+                field.value=''; field.dispatchEvent(new Event('input',{bubbles:true}));
+                field.value=v; field.dispatchEvent(new Event('input',{bubbles:true}));
+                field.dispatchEvent(new KeyboardEvent('keydown',{bubbles:true,cancelable:true,key:'Enter',code:'Enter',keyCode:13,which:13}));
+                field.dispatchEvent(new KeyboardEvent('keyup',{bubbles:true,cancelable:true,key:'Enter',code:'Enter',keyCode:13,which:13}));
+                c++;
+              }
+              return c;
+            };
+            const removeFrom = (label, values)=>{
+              if (!values?.length) return 0;
+              const area = inputs.find(el=>normalize(el.getAttribute('aria-label')).includes(label))?.closest('div');
+              if (!area) return 0;
+              let removed=0;
+              const chips = Array.from(area.querySelectorAll(chipsSel)).filter(visible);
+              for (const v of values){
+                const vn = normalize(v);
+                const chip = chips.find(ch=>normalize(ch.getAttribute('aria-label')||ch.getAttribute('data-hovercard-id')||ch.getAttribute('email')||ch.textContent).includes(vn));
+                if (chip){
+                  const rm = chip.querySelector('[aria-label*="Remove" i], [data-tooltip*="Remove" i], [role="button"]');
+                  try { (rm||chip).click(); removed++; } catch(_){ }
+                }
+              }
+              return removed;
+            };
+            const added = {
+              to: typeIn('to', p.toAdd), cc: typeIn('cc', p.ccAdd), bcc: typeIn('bcc', p.bccAdd)
+            };
+            const removed = {
+              to: removeFrom('to', p.toRemove), cc: removeFrom('cc', p.ccRemove), bcc: removeFrom('bcc', p.bccRemove)
+            };
+            return { success:true, added, removed };
+          }
+        }, (results)=>{
+          const res = results?.[0]?.result;
+          if (res?.success) sendResponse({status:'ok', action:'gmail_update_recipients', info: res});
+          else sendResponse({status:'error', message: res?.reason || 'gmail_update_recipients_failed'});
+        });
+      });
+      return true;
+    }
+
+    case "gmail_send": {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const tab = tabs?.[0]; if (!tab?.id||!tab?.url){ sendResponse({status:'error', message:'No active tab found'}); return; }
+        let isGmail=false; try{ const u=new URL(tab.url); isGmail=/(^|\.)mail\.google\.com$/i.test(u.host)||/gmail/i.test(u.host);}catch(_){ }
+        if (!isGmail) { sendResponse({ status:'error', message:'gmail_send only works on Gmail' }); return; }
+        chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          args: [],
+          func: () => {
+            // Try clicking the Send button
+            const btnSel = [
+              'div[role="button"][data-tooltip*="Send" i]',
+              'div[role="button"][aria-label*="Send" i]'
+            ].join(',');
+            const btn = Array.from(document.querySelectorAll(btnSel)).find(el=>el && el.offsetParent !== null);
+            if (btn) { try { btn.scrollIntoView({behavior:'smooth',block:'center'}); btn.click(); return {success:true, method:'click'}; } catch(_){} }
+            // Fallback: keyboard shortcut Ctrl/Cmd + Enter
+            try {
+              const meta = navigator.platform.includes('Mac');
+              const opts = { bubbles:true, cancelable:true, key:'Enter', code:'Enter', keyCode:13, which:13, [meta?'metaKey':'ctrlKey']: true };
+              const active = document.activeElement || document.body;
+              active.dispatchEvent(new KeyboardEvent('keydown', opts));
+              active.dispatchEvent(new KeyboardEvent('keyup', opts));
+              return { success:true, method:'keyboard' };
+            } catch(_){ }
+            return { success:false, reason:'send_button_not_found' };
+          }
+        }, (results)=>{
+          const res = results?.[0]?.result;
+          if (res?.success) sendResponse({ status:'ok', action:'gmail_send', method: res.method });
+          else sendResponse({ status:'error', message: res?.reason || 'gmail_send_failed' });
+        });
       });
       return true;
     }

@@ -11,6 +11,7 @@ let recognition;
 let wakeActive = false;
 let wakeTimer = null;
 let processingUtterance = false; // prevent overlapping handling
+const RESTART_COOLDOWN_MS = 350; // small delay to avoid carryover overlap
 
 // ===== UI
 const btn = document.getElementById("btnToggle");
@@ -108,6 +109,12 @@ function stripAfterWake(text, sensitivity = 1) {
 async function aiInterpret(commandText) {
   try {
     setThinking(true);
+    // Provide page context to AI so it can infer Gmail-specific intents
+    let currentUrl = "";
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      currentUrl = tab?.url || "";
+    } catch (_) {}
     const availability = await LanguageModel.availability();
     if (availability === "unavailable") {
       appendTranscript("⚠️ Prompt API unavailable on this device.");
@@ -128,7 +135,6 @@ async function aiInterpret(commandText) {
             "search_web",
             "summarize",
             "rewrite_selection",
-            "draft_email",
             "type_text",
             "focus_ui",
             "go_back",
@@ -141,7 +147,14 @@ async function aiInterpret(commandText) {
             "window_fullscreen_on",
             "window_fullscreen_off",
             "pop_tab_to_window",
-            "ask_page"
+            "ask_page",
+            "open_email",
+            "open_gmail_section"
+            ,
+            "gmail_reply",
+            "gmail_forward",
+            "gmail_update_recipients",
+            "gmail_send"
           ]
         },
         args: {
@@ -163,15 +176,33 @@ async function aiInterpret(commandText) {
             target: { type: "string", enum: ["auto", "selection", "email", "page"] },
             // rewrite_selection
             tone: { type: "string" }, // free-form; default "natural"
-            // draft_email
-            details: { type: "string" }, // free-form gist, e.g., "I'm okay, thanks for the time"
-            email_tone: { type: "string" }, // optional: free-form, default polite professional
+            
             // type_text
             text:   { type: "string" },          // what to type (required)
             target: { type: "string" },          // e.g., "search", "email", "subject", "name", or free-form hint
             submit: { type: "boolean" },          // true = press Enter/submit after typing
             // new question property
-            question: { type: "string", description: "User's natural language question about the current page content" }
+            question: { type: "string", description: "User's natural language question about the current page content" },
+            // translate_page
+            lang: { type: "string", description: "Target language (ISO code like 'en', 'es', or a name like 'spanish'). Optional: if omitted, use default." },
+            // open_email
+            index: { type: "number", description: "Email index/position (1-based) in the inbox list" },
+            sender: { type: "string", description: "Filter by sender name or email address" },
+            subject: { type: "string", description: "Filter by subject text or keywords" }
+            ,
+            // gmail_reply
+            mode: { type: "string", description: "Reply mode: 'reply' or 'reply_all'", enum: ["reply","reply_all"] },
+            // gmail_forward / gmail_update_recipients / gmail_send
+            to: { type: "array", items: { type: "string" }, description: "Recipient emails or names to set for To" },
+            cc: { type: "array", items: { type: "string" }, description: "Recipient emails or names to set for Cc" },
+            bcc: { type: "array", items: { type: "string" }, description: "Recipient emails or names to set for Bcc" },
+            // granular updates
+            toAdd: { type: "array", items: { type: "string" } },
+            ccAdd: { type: "array", items: { type: "string" } },
+            bccAdd: { type: "array", items: { type: "string" } },
+            toRemove: { type: "array", items: { type: "string" } },
+            ccRemove: { type: "array", items: { type: "string" } },
+            bccRemove: { type: "array", items: { type: "string" } }
           },
           additionalProperties: false
         },
@@ -196,6 +227,13 @@ async function aiInterpret(commandText) {
         content:
           "You are Lazy Cat's command router.\n" +
           "Output ONLY valid JSON per schema. Exactly one command per request.\n" +
+          "Context: Current page URL is: " + (currentUrl || "unknown") + "\n" +
+          "If the current page is Gmail (mail.google.com), treat bare ordinal phrases like 'open first', 'open the 2nd', 'open third' as requests to open an email: use command='open_email' with args.index accordingly, even if the word 'email' is omitted.\n" +
+          "If on Gmail, map folder/category navigation like 'open inbox', 'go to spam', 'open drafts', 'open sent', 'open important', 'open starred', 'open all mail', 'open bin/trash', 'open snoozed', 'open scheduled', or 'open promotions/social/updates/forums' to command='open_gmail_section' with args.section being a short token (e.g., 'inbox','spam','drafts','sent','important','starred','all','trash','snoozed','scheduled','promotions','social','updates','forums').\n" +
+          "If on Gmail and the user says 'reply', map to command='gmail_reply' with args.mode='reply'. For 'reply all' use args.mode='reply_all'. Accept variants like 'reply to this', 'respond', 'answer', 'reply to this email'.\n" +
+          "If on Gmail and the user says 'forward', map to command='gmail_forward'. Extract recipients: 'to' and optional 'cc'/'bcc' as arrays of strings (emails or names). Example: 'forward this to alice@example.com and bob, cc charlie' → {command:'gmail_forward', args:{to:['alice@example.com','bob'], cc:['charlie']}}.\n" +
+          "For modifying recipients in the current compose, use command='gmail_update_recipients' with arrays toAdd/ccAdd/bccAdd and toRemove/ccRemove/bccRemove. Example: 'add john to cc and remove bob from to' → {command:'gmail_update_recipients', args:{ccAdd:['john'], toRemove:['bob']}}.\n" +
+          "For sending the current compose, use command='gmail_send'. Only trigger when the user clearly says 'send', 'send it now', or equivalent.\n" +
           "Open tab rules:\n" +
           "• If user says 'open new tab', 'create new tab', 'blank tab' → command='open_tab' with NO url.\n" +
           "• If user says 'open <site>' like 'amazon', 'youtube', 'gmail', etc. → command='open_tab' with args.url = full https:// URL.\n" +
@@ -216,7 +254,8 @@ async function aiInterpret(commandText) {
           "Clicking is temporarily disabled. Do not use any click commands.\n" +
           "For summarize: command='summarize', args.target is 'auto' unless user says selection/email/page.\n" +
           "For rewrite_selection: command='rewrite_selection'. args.tone is free-form; if missing, assume 'natural'. Return ONLY the rewritten text.\n" +
-          "For draft_email: command='draft_email'. args.details is the gist of the reply; args.email_tone is optional (free-form, default 'polite professional'). Return ONLY the draft email text (no subject line).\n" +
+          
+          "For translating the current page: use command='translate_page'. If the user specifies a language, put it in args.lang (ISO code like 'es' or a language name like 'spanish'). If unspecified, omit args.lang and the app will use a default.\n" +
           "For type_text: command='type_text'. args.text is the text to type; args.target is the target field (e.g., 'search', 'email', or free-form); args.submit=true to press Enter/submit after typing. Map phrases like \"type/enter/fill ...\" to command='type_text'. Put the literal text into args.text. Put a short target hint in args.target (e.g., \"search\", \"email\", \"subject\", \"name\", or a brief noun phrase). Set args.submit=true only if the user explicitly asks to submit or press enter.\n" +
           "For on-page verbs like \"go to/open/select/choose/activate …\", map to click_ui with args.text as the target label. For \"focus …/put cursor in …\", map to focus_ui with args.text as the target label.\n" +
           "For refresh: command='refresh'. args is empty. Trigger on phrases like 'refresh', 'reload', 'reload this page'.\n" +
@@ -234,9 +273,10 @@ async function aiInterpret(commandText) {
           "For explicit phrases like 'open this page in a new window', 'pop this tab out', 'move this tab to a new window' use command='pop_tab_to_window'.\n" +
           "Never confuse this with 'open_window' (creates empty window) or 'open_tab' (creates a new tab).\n" +
           "Never invent other fields. Never output any text outside the JSON." +
-          "For natural language questions about the current page (e.g., \"What are the dimensions?\", \"Who is the author?\", \"When was this posted?\"), use command='ask_page' with args.question containing the user's exact question."
+          "For natural language questions about the current page (e.g., \"What are the dimensions?\", \"Who is the author?\", \"When was this posted?\"), use command='ask_page' with args.question containing the user's exact question." +
+          "For opening emails in Gmail: use command='open_email'. Interpret ordinal expressions with AI and convert to 1-based integers for args.index. Support forms like 'first/second/third', numeric ordinals like '1st/2nd/3rd/10th', and spelled numbers including compounds like 'twenty first'. Examples: 'open first email' → args.index=1; 'open the 3rd email' → args.index=3. Support sender filters like 'open email from alice' → args.sender='alice'. Support subject filters like 'open email about meeting' → args.subject='meeting'. These can combine: 'open first email from bob' → args.index=1, args.sender='bob'."
       },
-      { role: "user", content: commandText }
+      { role: "user", content: "User request: " + commandText }
     ]);
 
     session.destroy?.();
@@ -254,7 +294,7 @@ async function aiInterpret(commandText) {
     }
 
   setCurrentCommand(commandText);
-  appendTranscript("🤖 " + JSON.stringify(parsed, null, 2));
+  appendTranscript(describePlanned(parsed));
 
   // Intercepts that run IN THE POPUP (not background)
     if (parsed.command === "summarize") {
@@ -272,12 +312,7 @@ async function aiInterpret(commandText) {
       await handleRewriteSelectionFromPopup(tone);
       setThinking(false); return;
     }
-    if (parsed.command === "draft_email") {
-      const details = (parsed.args?.details || "").trim();
-      const emailTone = (parsed.args?.email_tone || "polite professional").trim();
-      await handleDraftEmailFromPopup(details, emailTone);
-      setThinking(false); return;
-    }
+    
     if (parsed.command === "type_text") {
       // Clean leaked verbs from args.text
       parsed.args.text = sanitizeTypedText(parsed.args.text || "");
@@ -306,17 +341,15 @@ async function aiInterpret(commandText) {
     }
 
     // Send the rest to executor (background)
+    // For Gmail email opening, include the raw utterance to allow precise ordinal parsing on the page.
+    if (parsed.command === "open_email") {
+      parsed.args = { ...(parsed.args || {}), rawUtterance: commandText };
+    }
     chrome.runtime.sendMessage(
       { type: "executeCommand", data: parsed },
       (response) => {
         console.log("Executor response:", response);
-        if (response?.status === "ok") {
-          appendTranscript(`✅ Executed: ${JSON.stringify(response)}`);
-        } else if (response?.status === "noop") {
-          appendTranscript(`⚠️ Unsupported command`);
-        } else {
-          appendTranscript(`⚠️ ${response?.message || "Execution failed"}`);
-        }
+        appendTranscript(renderExecution(parsed, response));
         setThinking(false);
       }
     );
@@ -605,125 +638,7 @@ async function handleRewriteSelectionFromPopup(tone = "natural") {
   }
 }
 
-// ===== Draft email (3.3A3) — generate + insert; never send
-async function handleDraftEmailFromPopup(details, emailTone = "polite professional") {
-  try {
-    const gist = details || "A brief, polite reply thanking them.";
-    const lmAvail = await LanguageModel.availability();
-    if (lmAvail === "unavailable") {
-      appendTranscript("⚠️ Prompt API unavailable on this device.");
-      return;
-    }
-
-    const session = await LanguageModel.create({
-      output: { type: "text", languageCode: "en" }
-    });
-
-    // Keep model output as clean email body (no subject, no signatures unless asked)
-    const prompt = [
-      {
-        role: "system",
-        content:
-          "Write a short email reply body only (no subject line). " +
-          "Return ONLY the email text (no quotes, no code fences, no commentary). " +
-          "Tone should follow the user's request. " +
-          "Be clear, courteous, and concise. Keep names/placeholders if unspecified."
-      },
-      {
-        role: "user",
-        content:
-          `Tone: ${emailTone}\n` +
-          `Reply gist: ${gist}\n\n` +
-          "Constraints:\n" +
-          "- No subject line.\n" +
-          "- No markdown.\n" +
-          "- Keep greeting and sign-off minimal.\n" +
-          "- Preserve any explicit facts if given.\n"
-      }
-    ];
-
-    const raw = await session.prompt(prompt);
-    session.destroy?.();
-
-    const bodyText = String(raw).replace(/```[\s\S]*?```/g, "").trim();
-    if (!bodyText) {
-      appendTranscript("⚠️ Draft produced empty output");
-      return;
-    }
-
-    // Also show in transcript for copy
-    appendTranscript(`📧 Draft (${emailTone}):\n${bodyText}`);
-
-    // Try inserting into an open compose editor (Gmail/Outlook/webmail)
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab?.id) return;
-
-    const [{ result: inserted }] = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      args: [bodyText],
-      func: (plainText) => {
-        const isVisible = (el) => !!(el && el.offsetParent !== null);
-
-        const toHTML = (txt) => {
-          const esc = (s) => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-          // paragraphs: split on blank lines
-          const parts = txt.split(/\n\s*\n/);
-          return parts.map(p => `<p>${esc(p).replace(/\n/g, "<br>")}</p>`).join("");
-        };
-
-        const candidates = [
-          // Gmail
-          'div[aria-label="Message Body"]',
-          'div[aria-label="Message body"]',
-          // Outlook web
-          'div[aria-label="Message body"][contenteditable="true"]',
-          'div[role="textbox"][contenteditable="true"]',
-          // Generic rich editors
-          'div[contenteditable="true"]',
-          // As a last resort
-          'textarea'
-        ];
-
-        let target = null;
-        for (const sel of candidates) {
-          const els = Array.from(document.querySelectorAll(sel)).filter(isVisible);
-          if (els.length) { target = els[0]; break; }
-        }
-
-        if (!target) return { success: false, reason: "no_compose_editor" };
-
-        const isRich = target.isContentEditable;
-        if (isRich) {
-          target.innerHTML = toHTML(plainText);
-          target.dispatchEvent(new Event("input", { bubbles: true }));
-          target.dispatchEvent(new Event("change", { bubbles: true }));
-          return { success: true, where: "contenteditable" };
-        }
-
-        // textarea fallback
-        if (target.tagName === "TEXTAREA") {
-          const setter =
-            Object.getOwnPropertyDescriptor(target.__proto__, "value") ||
-            Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value");
-          setter?.set?.call(target, plainText);
-          target.dispatchEvent(new Event("input", { bubbles: true }));
-          target.dispatchEvent(new Event("change", { bubbles: true }));
-          return { success: true, where: "textarea" };
-        }
-
-        return { success: false, reason: "unknown_target_type" };
-      }
-    });
-
-    if (inserted?.success) {
-      appendTranscript(`✅ Inserted into ${inserted.where}. (Not sent)`);
-    } else {
-      appendTranscript(`ℹ️ Could not auto-insert (${inserted?.reason || "unknown"}). You can copy the draft above.`);
-    }
-  } catch (err) {
-    appendTranscript("❌ Draft error: " + err.message);
-  }
-}
+// (Email draft feature removed)
 
 // ===== Speech Recognition (accuracy-focused)
 function initRecognition() {
@@ -749,7 +664,10 @@ function initRecognition() {
   recognition.onend = () => {
     // release guard on session end before auto-restart
     processingUtterance = false;
-    if (listening) recognition.start();
+    if (listening) {
+      // small cooldown to prevent immediate re-capture of trailing audio
+      setTimeout(() => { try { recognition.start(); } catch (_) {} }, RESTART_COOLDOWN_MS);
+    }
     else setStatus("Stopped.");
   };
 
@@ -867,8 +785,8 @@ function denoiseUtterance(s) {
   if (!s) return s;
   let t = String(s);
 
-  // remove common fillers at boundaries or isolated
-  t = t.replace(/\b(um+|uh+|er+|ah+|like)\b\s*/gi, "");
+  // remove common fillers at boundaries or isolated (keep 'like' to preserve meaning)
+  t = t.replace(/\b(um+|uh+|er+|ah+)\b\s*/gi, "");
 
   // collapse repeated words: "open open tab" -> "open tab"
   // do this conservatively for up to 3 repetitions
@@ -883,4 +801,152 @@ function denoiseUtterance(s) {
   t = t.replace(/\s{2,}/g, " ").trim();
 
   return t;
+}
+
+// ---- Friendly UI messages ----
+function describePlanned(cmd) {
+  if (!cmd || !cmd.command) return "🤖 Couldn't understand the request.";
+  const c = cmd.command;
+  const a = cmd.args || {};
+  switch (c) {
+    case "open_tab":
+      return a.url ? `🔗 Will open: ${a.url}` : "🆕 Will open a new tab";
+    case "scroll":
+      return `🖱️ Will scroll ${a.direction === 'up' ? 'up' : 'down'}`;
+    case "scroll_bottom":
+      return "🖱️ Will go to the bottom";
+    case "scroll_top":
+      return "🖱️ Will go to the top";
+    case "search_web":
+      return a.query ? `🌐 Will search: ${a.query}` : "🌐 Will search the web";
+    case "type_text": {
+      const tgt = a.target ? ` into ${a.target}` : "";
+      const sub = a.submit ? ", then submit" : "";
+      return `⌨️ Will type "${a.text || ''}"${tgt}${sub}`;
+    }
+    case "focus_ui":
+      return `🎯 Will focus “${a.text || ''}”`;
+    case "go_back":
+      return "↩️ Will go back";
+    case "refresh":
+      return "🔄 Will refresh the page";
+    case "go_forward":
+      return "↪️ Will go forward";
+    case "close_tab":
+      return "❌ Will close this tab";
+    case "next_tab":
+      return "➡️ Will switch to next tab";
+    case "previous_tab":
+      return "⬅️ Will switch to previous tab";
+    case "open_window":
+      return "🪟 Will open a new window";
+    case "window_fullscreen_on":
+      return "🖥️ Will enter fullscreen";
+    case "window_fullscreen_off":
+      return "🖥️ Will exit fullscreen";
+    case "pop_tab_to_window":
+      return "🪟 Will pop this tab into a new window";
+    case "ask_page":
+      return `❓ Will answer: ${a.question || ''}`;
+    case "translate_page":
+      return `🌍 Will translate this page${a.lang ? ` to ${a.lang}` : " (default language)"}`;
+    case "open_email": {
+      let desc = "📧 Will open email";
+      if (a.index) desc += ` #${a.index}`;
+      if (a.sender) desc += ` from ${a.sender}`;
+      if (a.subject) desc += ` about ${a.subject}`;
+      return desc;
+    }
+    case "open_gmail_section":
+      return `📂 Will open Gmail: ${a.section || ''}`;
+    case "gmail_reply":
+      return `📧 Will ${a.mode === 'reply_all' ? 'reply all' : 'reply'} to this email`;
+    case "gmail_forward": {
+      const parts = [];
+      if (Array.isArray(a.to) && a.to.length) parts.push(`to ${a.to.join(', ')}`);
+      if (Array.isArray(a.cc) && a.cc.length) parts.push(`cc ${a.cc.join(', ')}`);
+      if (Array.isArray(a.bcc) && a.bcc.length) parts.push(`bcc ${a.bcc.join(', ')}`);
+      return `📨 Will forward this email${parts.length ? ' ' + parts.join('; ') : ''}`;
+    }
+    case "gmail_update_recipients": {
+      const ops = [];
+      const addPart = (label, arr) => { if (Array.isArray(arr) && arr.length) ops.push(`add ${arr.join(', ')} to ${label}`); };
+      const remPart = (label, arr) => { if (Array.isArray(arr) && arr.length) ops.push(`remove ${arr.join(', ')} from ${label}`); };
+      addPart('to', a.toAdd); addPart('cc', a.ccAdd); addPart('bcc', a.bccAdd);
+      remPart('to', a.toRemove); remPart('cc', a.ccRemove); remPart('bcc', a.bccRemove);
+      return ops.length ? `👥 Will ${ops.join('; ')}` : '👥 Will update recipients';
+    }
+    case "gmail_send":
+      return "🚀 Will send the current email";
+    case "summarize":
+      return `📝 Will summarize (${a.target || 'auto'})`;
+    case "rewrite_selection":
+      return `✍️ Will rewrite selection (${a.tone || 'natural'})`;
+    
+    default:
+      return `🤖 Planned: ${c}`;
+  }
+}
+
+function renderExecution(cmd, res) {
+  if (!res) return "⚠️ No response";
+  if (res.status === "noop") return "⚠️ Unsupported command";
+  if (res.status !== "ok") return `❌ ${res.message || 'Execution failed'}`;
+
+  const c = cmd?.command;
+  const info = res.action ? `(${res.action})` : "";
+  switch (c) {
+    case "open_tab":
+      return `✅ Opened ${res.url || 'a tab'} ${info}`;
+    case "scroll":
+      return `✅ Scrolled ${res.direction || ''}`;
+    case "scroll_top":
+      return "✅ Went to top";
+    case "scroll_bottom":
+      return "✅ Went to bottom";
+    case "search_web":
+      return `✅ Searched: ${cmd?.args?.query || ''}`;
+    case "type_text":
+      return `✅ Typed${res.info?.submitted ? ' and submitted' : ''}`;
+    case "focus_ui":
+      return `✅ Focused ${res.label ? `“${res.label}”` : ''}`;
+    case "go_back":
+      return "✅ Went back";
+    case "refresh":
+      return "✅ Refreshed";
+    case "go_forward":
+      return "✅ Went forward";
+    case "close_tab":
+      return "✅ Closed tab";
+    case "next_tab":
+      return "✅ Next tab";
+    case "previous_tab":
+      return "✅ Previous tab";
+    case "open_window":
+      return "✅ Opened new window";
+    case "window_fullscreen_on":
+      return "✅ Fullscreen on";
+    case "window_fullscreen_off":
+      return "✅ Fullscreen off";
+    case "pop_tab_to_window":
+      return "✅ Tab popped to window";
+    case "ask_page":
+      return res.answer ? `💬 ${res.answer}` : "✅ Answered";
+    case "translate_page":
+      return `✅ Opened translated page${res.lang ? ` (${res.lang})` : ''}`;
+    case "open_email":
+      return res.subject ? `✅ Opened: ${res.subject}` : "✅ Opened email";
+    case "open_gmail_section":
+      return `✅ Opened Gmail: ${cmd?.args?.section || ''}`;
+    case "gmail_reply":
+      return `✅ Opened ${cmd?.args?.mode === 'reply_all' ? 'Reply all' : 'Reply'} composer`;
+    case "gmail_forward":
+      return "✅ Opened Forward composer";
+    case "gmail_update_recipients":
+      return "✅ Updated recipients";
+    case "gmail_send":
+      return "✅ Sent email";
+    default:
+      return `✅ Executed ${info}`;
+  }
 }
