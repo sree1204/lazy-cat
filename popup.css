@@ -1,14 +1,17 @@
 body {
   width: 340px;
   margin: 0;
+  padding: 8px;
   font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
   background: #0b0f14;
   color: #e5e7eb;
+  border-radius: 20px;
+  box-sizing: border-box;
 }
 .card {
-  padding: 10px;
+  padding: 16px;
   border: 1px solid #1f2937;
-  border-radius: 14px;
+  border-radius: 18px;
 }
 button {
   background: #0f172a;
@@ -31,7 +34,7 @@ button {
 }
 .card-current {
   position: relative;
-  border-radius: 16px;
+  border-radius: 18px;
   overflow: hidden; /* ensure inner content respects rounding */
 }
 .current-cmd {
@@ -60,9 +63,24 @@ button {
 .card-current.thinking {
   animation: glow 1.2s ease-in-out infinite;
   box-shadow: 0 0 0px rgba(79, 70, 229, 0.0);
+  border: 1px solid rgba(79, 70, 229, 0.3);
 }
 @keyframes glow {
-  0% { box-shadow: 0 0 0px rgba(79, 70, 229, 0.0); }
-  50% { box-shadow: 0 0 18px rgba(79, 70, 229, 0.45); }
-  100% { box-shadow: 0 0 0px rgba(79, 70, 229, 0.0); }
+  0% { 
+    box-shadow: 0 0 0px rgba(79, 70, 229, 0.0);
+    border-color: rgba(79, 70, 229, 0.3);
+  }
+  50% { 
+    box-shadow: 
+      0 0 30px rgba(79, 70, 229, 1.0),
+      0 0 50px rgba(79, 70, 229, 0.9),
+      0 0 70px rgba(79, 70, 229, 0.8),
+      0 0 90px rgba(79, 70, 229, 0.6),
+      0 0 110px rgba(79, 70, 229, 0.4);
+    border-color: rgba(79, 70, 229, 1.0);
+  }
+  100% { 
+    box-shadow: 0 0 0px rgba(79, 70, 229, 0.0);
+    border-color: rgba(79, 70, 229, 0.3);
+  }
 }
