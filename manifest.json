@@ -10,7 +10,9 @@
   "permissions": [
     "tabs",
     "scripting",
-    "windows"
+    "windows",
+    "storage",
+    "tts"
   ],
   "host_permissions": ["<all_urls>"],
   "background": {

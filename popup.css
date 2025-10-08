@@ -21,7 +21,12 @@ button {
   padding: 8px 12px;
   cursor: pointer;
 }
-.status { margin-top: 8px; color: #93c5fd; }
+button#btnStopSpeak { background: #1f2937; }
+button#btnStopSpeak:hover { background: #374151; }
+.status { 
+  margin-top: 8px; 
+  color: #93c5fd; 
+}
 .brand {
   font-weight: 700;
   letter-spacing: 0.5px;
@@ -32,17 +37,44 @@ button {
   border-radius: 999px;
   text-transform: lowercase;
 }
+
+/* Mode button and menu */
+.mode-btn {
+  position: relative;
+}
+.mode-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  display: none;
+  min-width: 200px;
+  background: #0b0f14;
+  border: 1px solid #1f2937;
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+  z-index: 50;
+}
+.mode-menu.open { display: block; }
+.mode-menu[inert] { pointer-events: none; filter: grayscale(0.2) opacity(0.9); }
+.mode-menu[aria-hidden="true"] { display: none; }
+.mode-option {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  background: transparent;
+  color: #e5e7eb;
+  border: none;
+  cursor: pointer;
+}
+.mode-option:hover { background: #111827; }
+
 .card-current {
   position: relative;
   border-radius: 18px;
   overflow: hidden; /* ensure inner content respects rounding */
 }
-.current-cmd {
-  margin-top: 6px;
-  color: #cbd5e1;
-  font-size: 12px;
-  opacity: 0.85;
-}
+.current-cmd { display: none; }
 .result {
   white-space: pre-wrap;
   background: #111827;
@@ -55,11 +87,7 @@ button {
 }
 
 /* Thinking glow animation */
-.thinking {
-  margin-left: auto;
-  font-size: 12px;
-  color: #a5b4fc;
-}
+/* thinking badge removed; keep glow on card when we toggle */
 .card-current.thinking {
   animation: glow 1.2s ease-in-out infinite;
   box-shadow: 0 0 0px rgba(79, 70, 229, 0.0);
@@ -83,4 +111,136 @@ button {
     box-shadow: 0 0 0px rgba(79, 70, 229, 0.0);
     border-color: rgba(79, 70, 229, 0.3);
   }
+}
+
+/* History UI */
+.history-section {
+  margin-top: 12px;
+  border: 1px solid #1f2937;
+  border-radius: 12px;
+  background: #0f172a;
+}
+
+.history-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  border-bottom: 1px solid #1f2937;
+}
+
+.history-stats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cache-stats {
+  font-size: 11px;
+  color: #64748b;
+  background: #1e293b;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.history-title {
+  font-weight: 600;
+  color: #a7f3d0;
+  font-size: 13px;
+}
+
+.clear-btn {
+  font-size: 11px;
+  padding: 4px 8px;
+  background: #dc2626;
+  color: white;
+  border: 1px solid #b91c1c;
+  border-radius: 6px;
+}
+
+.clear-btn:hover {
+  background: #b91c1c;
+}
+
+.history-list {
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.history-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 8px;
+  margin: 2px 0;
+  background: #1e293b;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.history-item-content {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex: 1;
+  margin-right: 8px;
+  font-size: 12px;
+}
+
+.history-item:hover {
+  background: #334155;
+}
+
+.history-item-desc {
+  flex: 1;
+  color: #e2e8f0;
+}
+
+.history-item-time {
+  color: #64748b;
+  font-size: 10px;
+  margin-left: 8px;
+}
+
+.controls {
+  margin-top: 8px;
+  text-align: center;
+}
+
+.toggle-history {
+  font-size: 12px;
+  padding: 6px 12px;
+  background: #1e293b;
+  color: #cbd5e1;
+  border: 1px solid #334155;
+  border-radius: 8px;
+}
+
+.toggle-history:hover {
+  background: #334155;
+}
+
+.history-delete-btn {
+  background: transparent;
+  border: none;
+  color: #ef4444;
+  font-size: 12px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity 0.2s, background 0.2s;
+}
+
+.history-delete-btn:hover {
+  opacity: 1;
+  background: #dc2626;
+  color: white;
+}
+
+.cache-indicator {
+  color: #22d3ee;
+  font-size: 10px;
+  margin-right: 4px;
 }

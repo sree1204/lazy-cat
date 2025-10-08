@@ -7,14 +7,34 @@
 </head>
 <body>
   <section class="card card-current" id="current">
-    <div class="row" style="display:flex; align-items:center; gap:8px;">
-      <div class="brand" aria-label="lazy" title="lazy">lazy</div>
+    <div class="row" style="display:flex; align-items:center; gap:8px; position: relative;">
+      <button id="modeButton" class="brand mode-btn" aria-haspopup="true" aria-expanded="false" title="Mode switch">🐱 Lazy Cat write</button>
+      <div id="modeMenu" class="mode-menu" role="menu" aria-hidden="true">
+        <button class="mode-option" data-mode="write" role="menuitem">🐱 Lazy Cat write</button>
+        <button class="mode-option" data-mode="speak" role="menuitem">🐱 Lazy Cat speak</button>
+      </div>
       <button id="btnToggle">🎤 Start Listening</button>
-      <span id="thinking" class="thinking" style="display:none">thinking…</span>
+  <button id="btnStopSpeak" title="Stop speaking" style="display:none;">⏹ Stop</button>
     </div>
-    <div id="status" class="status">Idle</div>
+  <div id="status" class="status"><span id="statusText">Listening… say 'Hey Cat' or 'Lazy Cat'.</span></div>
     <div id="currentCmd" class="current-cmd"></div>
     <pre id="result" class="result" aria-live="polite"></pre>
+    
+    <!-- Cache Section -->
+    <div id="historySection" class="history-section" style="display:none;">
+      <div class="history-header">
+        <span class="history-title">⚡ All Cache</span>
+        <div class="history-stats">
+          <span id="cacheStats2" class="cache-stats">⚡ 0 cached</span>
+          <button id="clearCache" class="clear-btn" title="Clear all cache entries">Clear Cache</button>
+        </div>
+      </div>
+      <div id="cacheList" class="history-list"></div>
+    </div>
+    
+    <div class="controls">
+      <button id="toggleHistory" class="toggle-history">Show Cache</button>
+    </div>
   </section>
 
   

@@ -4,7 +4,7 @@
 // Background executor messaging (open_tab, scroll, search_web, click_ui)
 // Summarize in popup (selection/email/page) with gesture-gated download
 // Rewrite selection in popup (free-form tone, default natural)
-// Draft email in popup (generate + insert into compose editor; no sending)
+// Command memory and voice output features
 
 let listening = false;
 let recognition;
@@ -12,38 +12,403 @@ let wakeActive = false;
 let wakeTimer = null;
 let processingUtterance = false; // prevent overlapping handling
 const RESTART_COOLDOWN_MS = 350; // small delay to avoid carryover overlap
+const DEFAULT_STATUS = "Listening… say 'Hey Cat' or 'Lazy Cat'.";
+
+// ===== Command History and Cache
+let commandHistory = [];
+let commandCache = new Map(); // userInput -> {command, args, timestamp}
+const SAFE_REUSE_COMMANDS = new Set([
+  "scroll",
+  "scroll_top", 
+  "scroll_bottom",
+  "go_back",
+  "go_forward",
+  "refresh",
+  "next_tab",
+  "previous_tab",
+  "close_tab"
+]);
+const CACHE_EXPIRY_HOURS = 24; // Commands expire after 24 hours
 
 // ===== UI
 const btn = document.getElementById("btnToggle");
 const statusEl = document.getElementById("status");
+const statusTextEl = document.getElementById("statusText");
 const currentCard = document.getElementById("current");
 const currentCmdEl = document.getElementById("currentCmd");
 const resultEl = document.getElementById("result");
-const thinkingBadge = document.getElementById("thinking");
+const modeButton = document.getElementById("modeButton");
+const modeMenu = document.getElementById("modeMenu");
+let speakMode = false; // false=write, true=speak
+let lastSpokenText = "";
+
+// Cache UI elements
+const toggleHistoryBtn = document.getElementById("toggleHistory");
+const historySection = document.getElementById("historySection");
+const cacheList = document.getElementById("cacheList");
 
 // Voice settings removed: use fixed moderate defaults
 
 // Debug toggle for cleaner logs
 const DEBUG_SHOW_IGNORED = false;
 
-function setStatus(msg) { statusEl && (statusEl.textContent = msg); }
-function appendTranscript(text) {
+function setStatus(msg) { 
+  if (!statusEl) return;
+  if (statusTextEl) {
+    statusTextEl.textContent = msg;
+  } else {
+    // fallback: keep old behavior if span missing
+    statusEl.textContent = msg;
+  }
+}
+function isThinking() { return !!(currentCard && currentCard.classList.contains("thinking")); }
+function appendTranscript(text, opts = {}) {
   if (!resultEl) return;
   // replace previous content with current output; extend if large
   resultEl.textContent = String(text);
+  // Only speak when explicitly requested for final outputs
+  const shouldSpeak = opts.speak === true;
+  console.log("📝 appendTranscript:", { text: String(text).slice(0, 50), shouldSpeak, speakMode, opts });
+  const clean = sanitizeForSpeech(String(text));
+  lastSpokenText = clean;
+  if (shouldSpeak && speakMode) speakText(clean);
 }
-function setCurrentCommand(text) { currentCmdEl && (currentCmdEl.textContent = text); }
+function sanitizeForSpeech(text) {
+  if (!text) return text;
+  let t = String(text);
+  // Strip common UI emojis/prefix icons
+  t = t.replace(/[📝✍️✅ℹ️⚠️❌🔗🖱️↩️↪️🪟🌐⌨️🎯📧📂📨👥🚀🌍💬🆕⬅️➡️🖥️]/g, "");
+  // Remove excessive punctuation around headers like "Summary (..):"
+  t = t.replace(/^\s*Summary\s*\([^)]*\)\s*:\s*/i, "");
+  t = t.replace(/^\s*Inserted into [^\.]+\.\s*/i, "");
+  // Collapse whitespace
+  t = t.replace(/\s{2,}/g, " ").trim();
+  return t;
+}
+function setCurrentCommand(text) { if (currentCmdEl) currentCmdEl.textContent = text; }
 function setThinking(on) {
-  if (!currentCard || !thinkingBadge) return;
+  if (!currentCard) return;
   currentCard.classList.toggle("thinking", !!on);
-  thinkingBadge.style.display = on ? "inline" : "none";
+  // reflect thinking state in status line only
+  if (on) setStatus("thinking..");
+  else setStatus(DEFAULT_STATUS);
+}
+
+// ===== Command History Management
+function shouldStoreInHistory(cmd) {
+  // Store most commands except UI-only operations
+  const skipCommands = new Set([
+    "noop", "error", "unknown"
+  ]);
+  return !skipCommands.has(cmd.command);
+}
+
+async function loadCommandHistory() {
+  try {
+    console.log("📚 Loading command history from storage...");
+    const result = await chrome.storage.local.get(['commandHistory', 'commandCache']);
+    console.log("📚 Raw storage result:", result);
+    
+    // Load history
+    if (result.commandHistory && Array.isArray(result.commandHistory)) {
+      commandHistory = result.commandHistory;
+      console.log("✅ Loaded command history:", commandHistory.length, "items", commandHistory);
+    } else {
+      console.log("⚠️ No command history found in storage or invalid format");
+      commandHistory = [];
+    }
+    
+    // Load cache
+    if (result.commandCache && typeof result.commandCache === 'object') {
+      commandCache = new Map(Object.entries(result.commandCache));
+      // Clean expired cache entries
+      cleanExpiredCache();
+      console.log("✅ Loaded command cache:", commandCache.size, "items", Array.from(commandCache.entries()));
+    } else {
+      console.log("⚠️ No command cache found in storage or invalid format");
+      commandCache = new Map();
+    }
+    
+    renderHistoryUI();
+    console.log("📚 Final state - History:", commandHistory.length, "Cache:", commandCache.size);
+  } catch (err) {
+    console.error("❌ Failed to load command data:", err);
+    commandHistory = [];
+    commandCache = new Map();
+  }
+}
+
+async function saveCommandHistory() {
+  try {
+    // Convert Map to Object for storage
+    const cacheObj = Object.fromEntries(commandCache);
+    const dataToSave = { 
+      commandHistory,
+      commandCache: cacheObj 
+    };
+    
+    console.log("💾 Saving command data:", dataToSave);
+    await chrome.storage.local.set(dataToSave);
+    console.log("✅ Successfully saved - history:", commandHistory.length, "cache:", commandCache.size);
+    
+    // Verify the save worked
+    const verification = await chrome.storage.local.get(['commandHistory', 'commandCache']);
+    console.log("🔍 Verification after save:", verification);
+  } catch (err) {
+    console.error("❌ Failed to save command data:", err);
+  }
+}
+
+function cleanExpiredCache() {
+  const now = Date.now();
+  const expiryMs = CACHE_EXPIRY_HOURS * 60 * 60 * 1000;
+  
+  for (const [userInput, entry] of commandCache.entries()) {
+    if (now - entry.timestamp > expiryMs) {
+      commandCache.delete(userInput);
+    }
+  }
+}
+
+function addToCache(userInput, command, args) {
+  if (!userInput || !command) return;
+  // Store original text and require exact 100% match for lookups
+  const key = String(userInput);
+  commandCache.set(key, {
+    command,
+    args: args || {},
+    // Human-readable execution summary (e.g., "Scroll down")
+    execution: getCommandDescription({ command, args: args || {} }),
+    timestamp: Date.now(),
+    text: key
+  });
+  
+  // Keep cache size reasonable
+  if (commandCache.size > 100) {
+    const entries = Array.from(commandCache.entries());
+    entries.sort((a, b) => b[1].timestamp - a[1].timestamp);
+    commandCache = new Map(entries.slice(0, 80)); // Keep most recent 80
+  }
+  
+  saveCommandHistory();
+  console.log("⚡ Added to cache:", key, "->", command);
+}
+
+function checkCache(userInput) {
+  if (!userInput) return null;
+  const key = String(userInput);
+  const cached = commandCache.get(key);
+  
+  if (cached) {
+    // Check if not expired
+    const now = Date.now();
+    const expiryMs = CACHE_EXPIRY_HOURS * 60 * 60 * 1000;
+    
+    if (now - cached.timestamp <= expiryMs) {
+      console.log("⚡ Cache hit for:", key, "->", cached.command);
+      return cached;
+    } else {
+      // Remove expired entry
+      commandCache.delete(key);
+      saveCommandHistory();
+    }
+  }
+  
+  console.log("⚡ Cache miss for:", key);
+  return null;
+}
+
+function addToHistory(cmd, originalUserCommand = null) {
+  if (!shouldStoreInHistory(cmd)) {
+    console.log("⏭️ Skipping history for command:", cmd.command);
+    return;
+  }
+
+  const historyEntry = {
+    command: cmd.command,
+    args: cmd.args || {},
+    timestamp: Date.now(),
+    userCommand: originalUserCommand || null,
+    description: getCommandDescription(cmd)
+  };
+
+  // Remove duplicates of safe reuse commands to avoid clutter
+  if (SAFE_REUSE_COMMANDS.has(cmd.command)) {
+    commandHistory = commandHistory.filter(item => item.command !== cmd.command);
+  }
+
+  commandHistory.unshift(historyEntry);
+  
+  // Keep only last 50 commands
+  if (commandHistory.length > 50) {
+    commandHistory = commandHistory.slice(0, 50);
+  }
+
+  // Add to cache if we have the original user command
+  if (originalUserCommand) {
+    addToCache(originalUserCommand, cmd.command, cmd.args);
+  }
+
+  saveCommandHistory();
+  renderHistoryUI();
+  console.log("📚 Added to history:", cmd.command, historyEntry.description);
+}
+
+function renderHistoryUI() {
+  // Only render cache view now
+  const cacheStats2El = document.getElementById("cacheStats2");
+  if (cacheStats2El) {
+    cacheStats2El.textContent = `⚡ ${commandCache.size} cached`;
+  }
+
+  if (!cacheList) return;
+  cacheList.innerHTML = "";
+
+  if (commandCache.size === 0) {
+    cacheList.innerHTML = '<div style="padding: 8px; color: #64748b; text-align: center; font-size: 12px;">No cache entries</div>';
+    return;
+  }
+
+  const entries = Array.from(commandCache.entries()).sort((a, b) => b[1].timestamp - a[1].timestamp);
+  for (const [key, entry] of entries) {
+    const row = document.createElement("div");
+    row.className = "history-item";
+
+    const content = document.createElement("div");
+    content.className = "history-item-content";
+
+    const desc = document.createElement("div");
+    desc.className = "history-item-desc";
+    const exec = entry.execution ? ` → ${entry.execution}` : "";
+    desc.textContent = `${key}${exec}`;
+
+    const time = document.createElement("div");
+    time.className = "history-item-time";
+    const t = new Date(entry.timestamp);
+    time.textContent = t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    content.appendChild(desc);
+    content.appendChild(time);
+
+    const del = document.createElement("button");
+    del.className = "history-delete-btn";
+    del.title = "Delete this cache entry";
+    del.textContent = "×";
+    del.addEventListener("click", (e) => {
+      e.stopPropagation();
+      commandCache.delete(key);
+      saveCommandHistory();
+      renderHistoryUI();
+    });
+
+    row.appendChild(content);
+    row.appendChild(del);
+    cacheList.appendChild(row);
+  }
+}
+
+function executeHistoryCommand(index) {
+  if (index < 0 || index >= commandHistory.length) return;
+  
+  const item = commandHistory[index];
+  console.log("🔄 Re-executing command from history:", item.command, item.args);
+  
+  // Don't add to history again when re-executing
+  executeCommand(item.command, item.args, false);
+}
+
+function toggleHistoryUI(show) {
+  if (!historySection || !toggleHistoryBtn) return;
+  
+  const isVisible = historySection.style.display !== "none";
+  const shouldShow = show !== undefined ? show : !isVisible;
+  
+  historySection.style.display = shouldShow ? "block" : "none";
+  toggleHistoryBtn.textContent = shouldShow ? "Hide Cache" : "Show Cache";
+  
+  if (shouldShow) {
+    renderHistoryUI();
+  }
+}
+
+function deleteHistoryCommand(index) {
+  if (index < 0 || index >= commandHistory.length) return;
+  const removed = commandHistory.splice(index, 1)[0];
+  // If this history entry has a userCommand, also delete the matching cache entry (exact key)
+  if (removed && removed.userCommand) {
+    const key = String(removed.userCommand);
+    if (commandCache.has(key)) {
+      commandCache.delete(key);
+      console.log("🗑️ Deleted cache entry for:", key);
+    }
+    // Backward compatibility: also try removing lowercased/trimmed legacy key
+    const legacy = key.toLowerCase().trim();
+    if (commandCache.has(legacy)) {
+      commandCache.delete(legacy);
+      console.log("🗑️ Deleted legacy cache entry for:", legacy);
+    }
+  }
+  saveCommandHistory();
+  renderHistoryUI();
+  console.log("🗑️ Deleted command from history, remaining:", commandHistory.length);
+}
+
+function clearAllHistory() {
+  commandHistory = [];
+  commandCache.clear();
+  saveCommandHistory();
+  renderHistoryUI();
+  console.log("🧹 Cleared all command history and cache");
+}
+
+// Clear only cache entries
+function clearAllCache() {
+  commandCache.clear();
+  saveCommandHistory();
+  renderHistoryUI();
+  console.log("🧹 Cleared all cache entries");
+}
+
+function getCommandDescription(cmd) {
+  switch (cmd.command) {
+    case "open_tab":
+      return cmd.args?.url ? `Open ${cmd.args.url}` : "Open new tab";
+    case "scroll":
+      return `Scroll ${cmd.args?.direction || "down"}`;
+    case "scroll_top":
+      return "Scroll to top";
+    case "scroll_bottom":
+      return "Scroll to bottom";
+    case "search_web":
+      return `Search: ${cmd.args?.query || ""}`;
+    case "type_text":
+      return `Type: ${(cmd.args?.text || "").slice(0, 30)}${cmd.args?.text?.length > 30 ? "..." : ""}`;
+    case "summarize":
+      return `Summarize ${cmd.args?.target || "auto"}`;
+    case "rewrite_selection":
+      return `Rewrite (${cmd.args?.tone || "natural"})`;
+    case "go_back":
+      return "Go back";
+    case "go_forward": 
+      return "Go forward";
+    case "refresh":
+      return "Refresh page";
+    case "close_tab":
+      return "Close tab";
+    case "next_tab":
+      return "Next tab";
+    case "previous_tab":
+      return "Previous tab";
+    default:
+      return cmd.command.replace(/_/g, " ");
+  }
 }
 function clearWakeTimer() { if (wakeTimer) { clearTimeout(wakeTimer); wakeTimer = null; } }
 function armWakeTimeout() {
   clearWakeTimer();
   wakeTimer = setTimeout(() => {
     wakeActive = false;
-    setStatus("Wake timed out. Say 'Hey Cat' or 'Lazy Cat' again.");
+    if (!isThinking()) setStatus(DEFAULT_STATUS);
   }, 5000);
 }
 
@@ -103,6 +468,35 @@ function stripAfterWake(text, sensitivity = 1) {
   const info = wakeMatches(text, sensitivity);
   if (!info) return null;
   return text.slice(info.index + info.match.length).trim();
+}
+
+// ===== Command Processing with Cache
+async function processCommand(userInput) {
+  if (!userInput) return;
+  
+  // First check cache for exact match
+  const cached = checkCache(userInput);
+  if (cached) {
+    console.log("⚡ Executing cached command:", cached.command, cached.args);
+    appendTranscript(`⚡ ${cached.command} (cached)`);
+    setThinking(true);
+    
+    // Execute cached command directly
+    chrome.runtime.sendMessage(
+      { type: "executeCommand", data: { command: cached.command, args: cached.args } },
+      (response) => {
+        console.log("Cached command response:", response);
+        const cmd = { command: cached.command, args: cached.args };
+        appendTranscript(renderExecution(cmd, response), { speak: true });
+        finishTask();
+      }
+    );
+    return;
+  }
+  
+  // No cache hit, go through AI interpretation
+  console.log("🧠 No cache hit, using AI for:", userInput);
+  await aiInterpret(userInput);
 }
 
 // ===== AI Router
@@ -216,7 +610,7 @@ async function aiInterpret(commandText) {
       responseConstraint: { type: "json_schema", schema },
       monitor(m) {
         m.addEventListener("downloadprogress", (e) => {
-          setStatus(`Downloading AI model… ${Math.round((e.loaded || 0) * 100)}%`);
+          setStatus("thinking..");
         });
       }
     });
@@ -294,23 +688,25 @@ async function aiInterpret(commandText) {
     }
 
   setCurrentCommand(commandText);
-  appendTranscript(describePlanned(parsed));
+  appendTranscript(describePlanned(parsed), { speak: false });
 
   // Intercepts that run IN THE POPUP (not background)
     if (parsed.command === "summarize") {
       const target = parsed.args?.target || "auto";
+      addToHistory(parsed, commandText);
       await handleSummarizeFromPopup(target);
-      setThinking(false); return;
+      finishTask(); return;
     }
     // Guard: clicking disabled for now
     if (parsed.command === "click_ui") {
       appendTranscript("ℹ️ Click is disabled right now.");
-      setThinking(false); return;
+      finishTask(); return;
     }
     if (parsed.command === "rewrite_selection") {
       const tone = (parsed.args?.tone || "natural").trim();
+      addToHistory(parsed, commandText);
       await handleRewriteSelectionFromPopup(tone);
-      setThinking(false); return;
+      finishTask(); return;
     }
     
     if (parsed.command === "type_text") {
@@ -345,18 +741,31 @@ async function aiInterpret(commandText) {
     if (parsed.command === "open_email") {
       parsed.args = { ...(parsed.args || {}), rawUtterance: commandText };
     }
+    
+    // Add command to history before execution
+    addToHistory(parsed, commandText);
+    
     chrome.runtime.sendMessage(
       { type: "executeCommand", data: parsed },
       (response) => {
         console.log("Executor response:", response);
-        appendTranscript(renderExecution(parsed, response));
+        appendTranscript(renderExecution(parsed, response), { speak: true });
         setThinking(false);
+        finishTask();
       }
     );
   } catch (err) {
     appendTranscript("❌ AI error: " + err.message);
     setThinking(false);
+    finishTask();
   }
+}
+
+// ===== Task Management
+function finishTask() {
+  setThinking(false);
+  // Reset any processing state
+  processingUtterance = false;
 }
 
 // ===== Summarizer helpers (3.3A1)
@@ -382,13 +791,13 @@ function showSummarizerInstallUI(onReady) {
         length: "medium",
         monitor(m) {
           m.addEventListener("downloadprogress", (e) => {
-            setStatus(`Downloading AI model… ${Math.round((e.loaded || 0) * 100)}%`);
+            setStatus("thinking..");
           });
         }
       });
       __lazycatSummarizer = summarizer;
       panel.style.display = "none";
-      setStatus("Summarizer ready.");
+  setStatus(DEFAULT_STATUS);
       onReady && onReady(summarizer);
     } catch (e) {
       appendTranscript("❌ Summarizer setup failed: " + e.message);
@@ -476,16 +885,16 @@ async function handleSummarizeFromPopup(target = "auto") {
     const summarizer = await getSummarizerOrPrompt();
     if (!summarizer) return;
 
-    setStatus("Summarizing…");
+  setThinking(true);
     const summary = await summarizer.summarize(extraction.text, {
       context: "Produce a concise, helpful summary for a busy reader."
     });
 
-    appendTranscript(`📝 Summary (${extraction.source}):\n${summary}`);
-    setStatus("Idle");
+    appendTranscript(`📝 Summary (${extraction.source}):\n${summary}`, { speak: true });
+  setThinking(false);
   } catch (err) {
     appendTranscript("❌ Summarize error: " + err.message);
-    setStatus("Idle");
+  setThinking(false);
   }
 }
 
@@ -627,7 +1036,7 @@ async function handleRewriteSelectionFromPopup(tone = "natural") {
       }
     });
 
-    appendTranscript(`✍️ Rewritten (${tone}):\n${rewritten}`);
+  appendTranscript(`✍️ Rewritten (${tone}):\n${rewritten}`, { speak: true });
     if (!replaced?.success) {
       appendTranscript(`ℹ️ Could not auto-insert (${replaced?.reason || "unknown"}). You can copy from above.`);
     } else {
@@ -658,9 +1067,19 @@ function initRecognition() {
 
   recognition.onstart = () => {
     processingUtterance = false; // reset guard on fresh start
-    setStatus("Listening… say 'Hey Cat' or 'Lazy Cat'.");
+    if (!isThinking()) setStatus("Listening… say 'Hey Cat' or 'Lazy Cat'.");
   };
-  recognition.onerror = (e) => setStatus("Error: " + e.error);
+  recognition.onerror = (e) => {
+    const err = e?.error || "";
+    // Silently ignore benign no-speech (common when mic is quiet)
+    if (err === "no-speech") {
+      // Don't surface this to UI; optionally reset status
+      if (!isThinking()) setStatus(DEFAULT_STATUS);
+      return;
+    }
+    // Show other errors
+    setStatus("Error: " + err);
+  };
   recognition.onend = () => {
     // release guard on session end before auto-restart
     processingUtterance = false;
@@ -668,7 +1087,7 @@ function initRecognition() {
       // small cooldown to prevent immediate re-capture of trailing audio
       setTimeout(() => { try { recognition.start(); } catch (_) {} }, RESTART_COOLDOWN_MS);
     }
-    else setStatus("Stopped.");
+    else if (!isThinking()) setStatus(DEFAULT_STATUS);
   };
 
   recognition.onresult = (event) => {
@@ -697,9 +1116,9 @@ function initRecognition() {
       if (afterWake) {
         const cleaned = denoiseUtterance(afterWake);
         if (cleaned) {
-          appendTranscript("🐱 " + cleaned);
+          appendTranscript("🐱 " + cleaned, { speak: false });
           processingUtterance = true;
-          aiInterpret(cleaned);
+          processCommand(cleaned);
         }
         wakeActive = false;
         clearWakeTimer();
@@ -715,9 +1134,9 @@ function initRecognition() {
     if (wakeActive) {
       const cleaned = denoiseUtterance(chosen);
       if (cleaned) {
-        appendTranscript("🐱 " + cleaned);
+  appendTranscript("🐱 " + cleaned, { speak: false });
         processingUtterance = true;
-        aiInterpret(cleaned);
+        processCommand(cleaned);
       }
       wakeActive = false;
       clearWakeTimer();
@@ -738,10 +1157,12 @@ btn && btn.addEventListener("click", () => {
     listening = true;
     recognition.start();
     btn.textContent = "🛑 Stop Listening";
+    if (!isThinking()) setStatus("Listening… say 'Hey Cat' or 'Lazy Cat'.");
   } else {
     listening = false;
     recognition.stop();
     btn.textContent = "🎤 Start Listening";
+    if (!isThinking()) setStatus("Listening… say 'Hey Cat' or 'Lazy Cat'.");
   }
 });
 
@@ -950,3 +1371,202 @@ function renderExecution(cmd, res) {
       return `✅ Executed ${info}`;
   }
 }
+
+// ===== Voice Output Functions (prefer chrome.tts for persistence)
+function setSpeakButtons(state) { /* Stop button removed per request */ }
+
+function speakText(text) {
+  if (!text || typeof text !== 'string') return;
+  if (!speakMode) return; // respect mode
+
+  lastSpokenText = text;
+  // Try chrome.tts first (continues even if popup closes)
+  if (chrome?.tts) {
+    try {
+      setSpeakButtons('speaking');
+      chrome.tts.stop();
+      chrome.tts.speak(text, {
+        rate: 0.95,
+        pitch: 1.0,
+        volume: 1.0,
+        enqueue: false,
+        onEvent: (e) => {
+          if (e.type === 'end' || e.type === 'interrupted' || e.type === 'cancelled' || e.type === 'error') {
+            setSpeakButtons('idle');
+          }
+        }
+      });
+      return;
+    } catch (e) {
+      console.warn('chrome.tts failed, falling back to speechSynthesis', e);
+    }
+  }
+
+  if (typeof speechSynthesis !== 'undefined') {
+    try {
+      setSpeakButtons('speaking');
+      if (speechSynthesis.speaking) speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.rate = 0.95; u.pitch = 1.0; u.volume = 0.9;
+      u.onend = () => setSpeakButtons('idle');
+      u.onerror = () => setSpeakButtons('idle');
+      speechSynthesis.speak(u);
+      return;
+    } catch (err) {
+      console.error('speechSynthesis error', err);
+      setSpeakButtons('idle');
+    }
+  }
+}
+
+function stopSpeaking() {
+  if (chrome?.tts) try { chrome.tts.stop(); } catch (_) {}
+  if (typeof speechSynthesis !== 'undefined') try { speechSynthesis.cancel(); } catch (_) {}
+}
+
+// ===== Execute Command (updated to support history)
+function executeCommand(command, args, addToHistoryFlag = true) {
+  const cmd = { command, args };
+  
+  if (addToHistoryFlag) {
+    addToHistory(cmd);
+  }
+  
+  // Send to background script for execution
+  chrome.runtime.sendMessage({ action: command, ...args }, (response) => {
+    if (chrome.runtime.lastError) {
+      console.error("❌ Runtime error:", chrome.runtime.lastError);
+      appendTranscript("❌ Extension error: " + chrome.runtime.lastError.message);
+      return;
+    }
+    
+    if (response) {
+      appendTranscript(renderExecution(cmd, response), { speak: true });
+    } else {
+      appendTranscript("✅ Command sent");
+    }
+    
+    finishTask();
+  });
+}
+
+// ===== Event Listeners and Initialization
+async function initializeExtension() {
+  console.log("🚀 Initializing Lazy Cat extension...");
+  
+  // Load command history and cache on startup
+  await loadCommandHistory();
+  console.log("📚 History loaded, cache size:", commandCache.size);
+
+  // Restore speakMode state
+  try {
+    const { speakModePersist } = await chrome.storage.local.get(['speakModePersist']);
+    if (typeof speakModePersist === 'boolean') {
+      speakMode = speakModePersist;
+      if (modeButton) modeButton.textContent = speakMode ? '🐱 Lazy Cat speak' : '🐱 Lazy Cat write';
+    }
+  } catch (_) {}
+}
+
+// Debug function to test storage manually
+window.testStorage = async function() {
+  console.log("🧪 Testing storage...");
+  
+  // Add test data
+  commandHistory = [{
+    command: "test",
+    args: {},
+    timestamp: Date.now(),
+    userCommand: "test command",
+    description: "Test command"
+  }];
+  
+  commandCache.set("test command", {
+    command: "test",
+    args: {},
+    timestamp: Date.now()
+  });
+  
+  await saveCommandHistory();
+  console.log("💾 Test data saved");
+  
+  // Clear memory
+  commandHistory = [];
+  commandCache.clear();
+  
+  // Reload
+  await loadCommandHistory();
+  console.log("📚 After reload - History:", commandHistory.length, "Cache:", commandCache.size);
+};
+
+// Initialize immediately and also on DOMContentLoaded for safety
+(async () => {
+  console.log("🔄 Immediate initialization start");
+  await initializeExtension();
+  console.log("✅ Immediate initialization complete");
+})();
+
+document.addEventListener("DOMContentLoaded", async () => {
+  console.log("📄 DOM loaded, ensuring initialization...");
+  
+  // Load command history on startup if not already done
+  if (commandHistory.length === 0 && commandCache.size === 0) {
+    console.log("🔄 Re-initializing from DOMContentLoaded");
+    await loadCommandHistory();
+  } else {
+    console.log("✅ Already initialized, skipping reload");
+  }
+  
+  // Mode button and menu
+  if (modeButton && modeMenu) {
+    modeButton.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const isOpen = modeMenu.classList.contains("open");
+      modeMenu.classList.toggle("open", !isOpen);
+      modeMenu.setAttribute("aria-hidden", isOpen ? "true" : "false");
+      modeButton.setAttribute("aria-expanded", isOpen ? "false" : "true");
+    });
+    
+    // Close menu when clicking outside
+    document.addEventListener("click", () => {
+      modeMenu.classList.remove("open");
+      modeMenu.setAttribute("aria-hidden", "true");
+      modeButton.setAttribute("aria-expanded", "false");
+    });
+    
+    // Mode selection
+    modeMenu.addEventListener("click", (e) => {
+      const option = e.target.closest(".mode-option");
+      if (!option) return;
+      
+  const mode = option.dataset.mode;
+  speakMode = mode === "speak";
+  // Persist speak mode
+  chrome.storage.local.set({ speakModePersist: speakMode }).catch(() => {});
+      
+      modeButton.textContent = option.textContent;
+      modeMenu.classList.remove("open");
+      modeMenu.setAttribute("aria-hidden", "true");
+      modeButton.setAttribute("aria-expanded", "false");
+      
+      console.log("🎛️ Mode switched to:", mode, "speakMode:", speakMode);
+      
+      // no spoken announcement on mode switch
+    });
+  }
+  
+  // Cache UI event listeners
+  if (toggleHistoryBtn) {
+    toggleHistoryBtn.addEventListener("click", () => toggleHistoryUI());
+  }
+  // Stop button removed; speech can be interrupted by toggling modes or new output
+  
+  const clearCacheBtn = document.getElementById("clearCache");
+  if (clearCacheBtn) {
+    clearCacheBtn.addEventListener("click", () => {
+      if (confirm("Clear all cache entries?")) {
+        clearAllCache();
+      }
+    });
+  }
+});
